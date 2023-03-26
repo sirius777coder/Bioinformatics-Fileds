@@ -1,8 +1,1013 @@
-# Biochemistry Background 
+# Biochemistry  
 
 [toc]
 
-## 基本单词
+## Deep Lerning Blocks
+
+### Attention is all you need
+
+Basic Blocks
+
+1. position encoding 来保证模型不是permutaiton equivariant
+
+> Since our model contains no recurrence and no convolution, in order for the model to make use of the order of the sequence, we must inject some information about the relative or absolute position of the tokens in the sequence. To this end, we add “positional encodings” to the input embeddings at the bottoms of the encoder and decoder stacks. The positional encodings have the same dimension $d_{model}$ as the embeddings, so that the two can be summed. There are many choices of positional encodings, learned and fixed.
+>
+> In this work, we use sine cond cosine functions of different frequencies:
+> $$
+> PE_{(pos,2i)} = \sin(pos/10000^{2i/d_{model}})\\
+> PE_{(pos,2i+1)} = \cos(pos/10000^{2i/d_{model}})\\
+> $$
+> Where "pos" is the position from 0 to max_len -1 , and i is the dimension from 0 to d_model(512)
+>
+> ```python
+> # code in the paper
+> class PisitionalEncoding(nn.Module):
+> def __init__(slef,d_model,dropout,max_len=5000):
+>  super().__init__()
+>  self.dropout = nn.Dropout(p=dropout)
+> 
+> #compute the positional encodings once in log space.
+>  pe = torch.zeros(max_len,d_model)
+>  position = torch.arange(0,max_len).unsqueeze(1) #[max_len, 1]
+>  div_term = torch.exp(
+>    torch.arange(0,d_model,2) * (- (math.log(10000.0)/d_model))
+>  ) # [d_model/2]
+>  pe[:,0::2] = torch.sin(position * div_term) # broadcast : [max_len, 1]* [d_model/2] -> [max_len, d_model/2] 
+>  pe[:,1::2] = torch.cos(position * div_term)
+>  pe = pe.unsqueeze(0) # add batch dimension
+>  self.register_buffer("pe",pe)
+> 
+> def forward(self,x):
+>  x = x+ self.pe[:,:x.size(1)].requires_grad_(False)
+>  return self.dropout
+> 
+> # code in fairseq in line with tensor2tensor
+> @staticmethod
+> def get_embedding(
+>     num_embeddings: int, embedding_dim: int, padding_idx: Optional[int] = None
+> ):
+>     """Build sinusoidal embeddings.
+>     This matches the implementation in tensor2tensor, but differs slightly
+>     from the description in Section 3.5 of "Attention Is All You Need".
+>     """
+>     half_dim = embedding_dim // 2
+>     emb = math.log(10000) / (half_dim - 1)
+>     emb = torch.exp(torch.arange(half_dim, dtype=torch.float) * -emb)
+>     emb = torch.arange(num_embeddings, dtype=torch.float).unsqueeze(
+>         1
+>     ) * emb.unsqueeze(0)
+>     emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1).view(
+>         num_embeddings, -1
+>     )
+>     if embedding_dim % 2 == 1:
+>         # zero pad
+>         emb = torch.cat([emb, torch.zeros(num_embeddings, 1)], dim=1)
+>     if padding_idx is not None:
+>         emb[padding_idx, :] = 0
+>     return emb
+
+
+
+2. Optimizer
+
+> We used the Adam optimizer with $\beta_1 = 0.9, \beta_2=0.98,\epsilon=10^{-9}$. We varied the learning rate over the course of training, according to the formula :
+> $$
+> lrate = d_{model}^{-0.5}\times\min(step\_num^{-0.5}, step\_num \times warmup\_steps^{-1.5})
+> $$
+> 注意：可以通过两种方式定义warmup 1.只定义线性增长的步数, 和transofrmer原文里一样通过model size控制lr增长  2.定义线性增长步数的同时定义最大lr ，完全自定义lr增长
+> 需要的pytorch函数
+>
+> ```python3
+> # transformer warmup
+> 
+> def transformer_rate(step,warmup,model_size):
+>     if step == 0:
+>         step = 1
+>     return model_size ** (-0.5) * min(step**(-0.5),step * warmup ** (-1.5))
+> 
+> lr_scheduler = LambdaLR(optimizer=optimizer, lr_lambda=lambda step: transformer_rate(step,warmup,model_size))
+> ```
+>
+
+
+
+3. Decoder的细节
+
+> 1. 注意到有tgt处有两种mask : padding mask &  std mask (避免看到未来的单词)
+> 2. Decoder的输入是tgt[:,:-1], 标签是tgt[:,1:]
+>
+> e.g. 完整的tgt是`<bos>,<I>,<love>,<deep>,<learning>,<.>,<eos>` 长度为N
+>
+> 输入就是`<bos>, <I>, <love>,<deep>,<learning>,<.>`  长度为N-1每一个token对应预测的值为:
+>
+> ​                `<I>, <love>,<deep>,<learning>,<.>,<eos>`    标签，长度也为N-1
+>
+> 所以future words mask是可以看到自己的，根据自己来预测下一个token
+>
+> 3. Decoder 重复N层 (GPT)
+>
+> ```python
+> class Batch:
+>     """Object for holding a batch of data with mask during training."""
+> 
+>     def __init__(self, src, tgt=None, pad=2):  # 2 = <blank>
+>         self.src = src #[B,L_s]
+>         self.src_mask = (src != pad).unsqueeze(-2) #[B, 1, L_s] 表示padding mask
+>         if tgt is not None:
+>             self.tgt = tgt[:, :-1] #decoder input不用考虑最后一个token <eos>
+>             self.tgt_y = tgt[:, 1:] #deocoder label不用考虑第一个token <bos>
+>             self.tgt_mask = self.make_std_mask(self.tgt, pad) #decoder mask : padding mask + mask future words
+>             self.ntokens = (self.tgt_y != pad).data.sum()
+> 
+>     @staticmethod
+>     def make_std_mask(tgt, pad):
+>         "Create a mask to hide padding and future words."
+>         tgt_mask = (tgt != pad).unsqueeze(-2) #[B, 1, L_t]
+>         tgt_mask = tgt_mask & subsequent_mask(tgt.size(-1)).type_as(
+>             tgt_mask.data
+>         ) #[B, 1, L_t] & [1, L_t, L_t] = [B, L_t, L_t]
+>         return tgt_mask
+> 
+> def subsequent_mask(size):
+>     "Mask out subsequent positions."
+>     attn_shape = (1, size, size)
+>     subsequent_mask = torch.triu(torch.ones(attn_shape), diagonal=1).type(
+>         torch.uint8
+>     )
+>     return subsequent_mask == 0
+> 
+> ```
+>
+> 
+
+
+
+
+
+### CLIP
+
+- 框架：对比学习预训练 + prompt template zero shot prediction
+
+![image-20230325123114226](/Users/sirius/Library/Application Support/typora-user-images/image-20230325123114226.png)
+
+- 核心：在40million的图像-文本对 利用**对比学习**进行预训练 得到自然语言的监督信号和视觉的表征，利用Prompt + template 的方式对下游discriminative任务进行zero-short learning
+
+- 技术细节
+
+  - 当前预训练的三种任务
+    - autoregressive (language model)
+    - masked language model
+    - contrastive learning (更适合多模态的预训练)
+  - 原来CV的预训练：给定一个大的数据集和label类别，利用图像分类做预训练之后；采样**linear-probe representation learning**的方法，保持骨干网络不变，只修改最后一个linear + softmax 预测层的方法做到下游任务
+  - 为什么OpenAI不采用GPT-style来训练CLIP，即给定图片来预测文字
+    - 如果采样decoder 方法进行训练，需要精准的预测每一张image对应的word，然而每一张word可能对应多个单词，同时训练起来也比较贵
+  - CLIP伪代码
+
+  ``` python
+  # image_encoder 		- ResNet or ViT
+  # test_encoder	  	- CBOW or Text Transformer
+  # I[n, h, w, c] 		- minibatch of alignedimages
+  # I[n, l] 					- minibatch of texts
+  # W_i[d_i, d_e]			- learned proj of image to embed
+  # W_t[d_t, d_e]			- learned proj of text to embed
+  # t 								- learned temperature parameter
+  
+  # extract faeture representations of each modality
+  I_f = image_encoder(I)
+  T_f = text_encoder(T)
+  
+  # joint multimodal embedding [n, d_e] 将不同模态的空间信息投影到一个joint space
+  I_e =  l2_normalize(np.dot(I_f,W_i), axis=1)
+  T_e =  l2_normalize(np.dot(T_f,W_t), axis=1)
+  
+  # scaled pairwise cosine similarities [n,n], 注意到由于提前使用了归一化, cosine similarities长度即为1
+  logits = np.dot(I_e, T_e.T) * np.exp(t)
+  
+  # symmetric loss fuction
+  labels = np.arange(n) # [n,]
+  loss_i = cross_entropy_loss (logits,labels,axis=0) #[B,n] vs [B,],image 是dim = 0 为图片，每一行为每一个图片对应的文字match概率
+  loss_t = cross_entropy_loss (logits,labels,axis=1) #text是 dim = 1, 每一列为1段文字对应第几个图片
+  loss = (loss_i+loss_t)/2
+  ```
+
+  - 实验部分
+
+    - 为什么要做prompt  engineering (promt ensembling)
+
+      - polysemy 多义性
+      - 训练时只见过句子和图片的配对 而不是单词和图片的配对 (distribution gap)
+      - prompt template 能够帮助推理 e.g. "A photo of a {label}, a type of pet"
+
+    - 具体做的实验
+
+      - Zero-shot 不用训练直接推理
+
+      - Few-shot 每个label用1-2-4-8-16个样本 推理训练
+
+      - 全样本数据集进行训练推理
+
+        - linea probe : 冻住骨干网络，只变化线性分类头 ( CLIP模型采样的方法)
+
+        - fine tune : 端到端的网络学习
+
+- 总结：NLP里面利用大规模的数据集进行下游任务无关的训练方式(task-agnostic)
+
+
+
+### DALLE2
+
+> Hierarchical Text-Coniditional Image Generation with **CLIP Latents**
+>
+> 使用CLIP训练好的特征，来做层级式的(先生成小分辨率模型不断上采样)，依托于文本的图像生成
+
+**核心是利用CLIP的text embedding 或image embedding当classifier free guidance** 
+
+- OpenAI  文本图像生成一系列工作历史
+
+  - 2021 01 DALLE
+
+  - 2021 12 GLIDE (图扩散模型做像生成)
+
+  - **2022 04 DALLE2  : GLIDE + CLIP** 
+    - Unconditional Design : 根据文本描述来生成**原创性的图片(fake image)**
+    - In-painting : 根据文本对图片进行编辑和修改 (diffusion model并非discriminative，而是扩散生成模型，可以生成任意多不同细节的图片)
+    - 直接输入图片，生成很多图片的变体
+  - 2022 05 Imagen from Google
+
+
+
+- 摘要 ：
+  - 类似CLIP的对比学习可以很好的学习到图片的semantics and style 鲁棒表征，为了利用好这种特征来做生成任务，作者提出了一种两个阶段的模型：a prior that generates a CLIP image embedding given a text caption, and a decoder that generates an image conditioned on the image embedding.
+  - 显示的建模图像的表征  有效的提高了图片的多样性，且并不会损失图片的写实程度 以及 图片与文字的匹配性 ---- 表示prior model生成image embedding 存在的必要性
+  - 因为CLIP学习到了文本和图片的多模态embedding space，所以可以zero shot来用文本对图片进行操作 (Inpainting)
+
+
+
+- 引言
+
+  - CLIP模型通过 scaling models on large datases of captioned images 能够获得非常robust 图片表征，可以在很多个不同的领域获得zero-shot能力
+
+  - 目前diffusion模型已经dominate生成模型领域, 一个著名的技巧是利用guidance technique 来引导生成模型牺牲一部分多样性，达到更好的保真度(sample fidelity)
+
+    - DDPM
+    - Improved DDPM : DALLE 二作、三作 受到启发
+      - 高斯分布的方差是可以学习的
+      - 添加噪声从线性schedule变为余弦schedule
+      - diffusion模型很适合大模型
+    - Diffusion Models Beat GANs  
+      - 模型加大加宽
+      - 使用classifier guidance 来引导生成，只用采样25step就能得到好的结果
+    - GLIDE : 3.5 B
+      - classifier free guidance
+    - DALLE2
+      - prior 
+      - 层级式生成 : 64 + 256 + 1024
+
+    
+
+- 预备知识 : 
+
+  - 引导模型生成
+
+    - guided 
+      - 训练时增加引导生成$||\epsilon - \hat{\epsilon}(x_t,t,y(x_t))||^2$
+      - 推理时也增加引导推理$p_{\theta}(x_{{t-1}}|x_t) \approx \hat{\epsilon}(x_t,t,y(x_t))$，一般此类方法主要为了提升模型的质量而不是真的做引导，因为模型从训练开始就一直见过这个引导信号，所以可控生成方法比较弱
+    - classifier guided 
+      - 在训练模型时不变
+      - 推理的时候对预测的噪音利用guided score进行引导 :  $\hat{\epsilon} = \epsilon_{\theta}(x_t) - \sqrt{1-\overline{\alpha_t}}\omega \nabla_{x_t}f(y|x_t)$, $\omega $ 为控制引导部分的权重
+
+    > - 具体证明过程是考虑到score function和epsilon的关系 $ s_{\theta}(x_t,t)= -\frac{\hat{\epsilon}(x_t,t)}{\sqrt{1-\overline{\alpha_t}}}$ ，如果score变成了条件概率分布的score，则对应的高斯分布的噪音可以通过$-\sqrt{1-\overline{\alpha_t}} s_{\theta}(x_t,t | y)$ 来生成对应的概率分布的噪音
+    >
+    > - 缺点：虽然训练不受影响，但是需要一个外界的guidance，比如在noised ImageNet上训练一个预测加噪图片的分类器，还是不太方便
+
+    - **classifier-free guidance ** : 训练模型时以一定的概率加入引导生成，推理时全部加入引导生成；这样通过一次diffusion模型训练就可以得到两种不同的概率分布
+
+      - 网络在训练的时候同时见过两种输入：一种是有引导的$\hat{\epsilon}(x_t,t,y)$, 另一种是完全没有引导的 $\hat{\epsilon}(x_t,t,\phi)$, $\phi$ 表示在训练的时候按照一定的比例drop掉classifier 信息为空集 (不是mask是drop) 
+      - 推理时：给网络两种不同的输入， 对结果进行组合$\overline{\epsilon}_{\theta}(x_t,t,y) = (1+\omega)\epsilon_{\theta}(x_t,t,y) - \omega \epsilon_\theta (x_t,t)$![截屏2023-03-25 21.06.54](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-03-25 21.06.54.png)
+      - 缺点：虽然只用训练一个模型，但对训练难度比较高，希望模型具有两种不同的输出而不被confused，对于大公司而言无所谓
+      - 注意：这个引导$y$ 可以有很多个向量张量组成
+
+      
+
+
+
+
+
+- DALLE2 模型
+
+  - Note
+
+    - CLIP多模态信息有时候是ground truth 有时候是 guidance
+    - CLIP信息在Decoder中为输入(image embedding guidance), 在prior 中为ground truth标签(image embedding)和输入(text embedding guidance)
+
+  - 训练数据：图片和文本对(x,y)，同时还用训练好的CLIP模型得到$z_i$和$z_t$ ,分别训练以下两个模型
+
+  - 由于CLIP模型是deterministic model 
+
+    - $P(z_i|y) = P(z_i|y,z_t)$
+    - $P(x|y) = P(x,z_t|y)$
+
+  - **Decoder ** : $P(x|z_i,y)$  根据CLIP Image embeddding和文字描述生成图片
+
+    - diffusion的对象是原始图片$x$ , $z_i$和$y$表示 模型同时对CLIP的ground truth image embedding和image caption 进行classifier free guidance指导生成
+    - 10% CLIP Image embedding为0，50% text caption 为空
+    - 该diffusion用的网络结构是spatial cnn 没有用卷积层
+
+  - **Prior **: $P(z_i|y) = P(z_i|y,z_t)$  根据CLIP text embedding和文字生成CLIP Image embedding
+
+    - diffusion的对象是CLIP-ground turth image emdedding $z_i^{(0)}$, 即给一个embedding 向量加噪去噪, 目标函数为$\mathbb{E}_{t\sim [1,2..,T],z_{i}^{t}\sim q(z_i^t | z_i ^{(0)})}[|| f_\theta (z_i^{(t)},t,y)- z_i^{(0)}||^2]$
+
+    - 此时的 classifier free guidance 包括text caption $y$ 和 CLIP-ground turth text emdedding $z_t$ , 在训练时分别以10%进行drop
+
+    - 模型由于要预测一个1维序列，采样**transformer-decoder** 自回归的形式
+
+      > 模型的输入有5部分：
+      >
+      > - decoder style input : **final embedding whose output from the Transformer** (自回归解码时上一次解码出的结果嵌入)
+      > - guidance : **text**
+      > - guidance : **CLIP text embedding**
+      > - normal diffusion : **time embedding**
+      > - normal diffusion : **noised CLIP image embedding** 
+      >
+      > 模型的输出：预测$z_i^{(0)}$ 即预测原始的样本而不是预测噪音
+
+
+
+- DALLE2 灵活使用两个模块进行下游任务
+
+  1. **论文里展示的根据文本$y$生成图片$x$ : two stage model**
+
+  - ![image-20230325213517929](/Users/sirius/Library/Application Support/typora-user-images/image-20230325213517929.png)
+
+  - prior : 给定一个文本$y$ , 以$y$和CLIP-ground truth text embedding为指导从高斯噪音扩散生成image embedding $z_i$
+
+  - decoder : 给定生成的image embedding $z_i$, ， 以$z_i$和文本特征$y$ 为指导从高斯噪音进行扩散生成image $x$ 
+
+    > decoder中可以仅仅以$z_i $为guidance，不需要$y$
+
+  2. 给定图片$x$ 生成图片的变体
+
+  - 通过CLIP image encoder 将$x$ 变为$z_i$ 
+
+  - 以$z_i$ 为guidance 仅通过decoder对$x_T$  ($x$ 利用DDIM进行反向加噪) 进行扩散去噪
+
+    > To do this, we apply the decoder to the bipartite representation ($z_i, x_T$ ) using DDIM with *η >* 0 for sampling. **With *η* = 0, the decoder becomes deterministic and will reconstruct the given image *x***. Larger values of *η* introduce stochasticity into successive sampling steps, resulting in variations that are perceptually “centered” around the original image *x*. As *η* increases, these variations tell us what information was captured in the CLIP image embedding (and thus is preserved across samples), and what was lost (and thus changes across the samples).
+
+  3. 给定图片$x_1,x_2,\theta \in [0,1]$进行插值, 本质是对$x_{T_1}$ 和 $x_{T_2}$ 进行插值 得到$x_T$，对$z_{i_1}$和$z_{i_2}$ 进行插值得到$z_i$
+
+  4. 图片和文本进行生成：输入文本对图片进行修饰 ( **Text Diffs**)
+
+     > 有CLIP text ground truth embedding $z_t$ 和**prior**生成的embedding $z_0$ ,可以得到一个text drift $z_d = norm(z_t -z_0)$ ，接着通过CLIP image ground truth embedding $z_i$ 和$z_d$ 进行插值来进行修饰
+
+
+
+- DALLE2 不足和局限性
+  - 不能把物体和属性结合起来 : CLIP模型训练的时候只有相似性
+  - 直接生成文字做的不好
+
+
+
+### FrameDiff
+
+1. time embedding  = transformer 位置编码  + nn sequential projection
+
+>  DDPM : Diffusion time *t* is specifified by adding the Transformer sinusoidal position embedding into each residual block
+
+
+
+RF diffusion code by David Juergens
+
+```python
+def get_timestep_embedding(timesteps, embedding_dim, max_positions=10000):
+    # Code from https://github.com/hojonathanho/diffusion/blob/master/diffusion_tf/nn.py
+    # timesteps : torch.tensor([0,1,2,3...,T]) total T steps noise and 0 for motif no noise
+    assert len(timesteps.shape) == 1
+    half_dim = embedding_dim // 2
+    emb = math.log(max_positions) / (half_dim - 1)
+
+    emb = torch.exp(torch.arange(half_dim, dtype=torch.float32, device=timesteps.device) * -emb)
+    emb = timesteps.float()[:, None] * emb[None, :]
+    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+    if embedding_dim % 2 == 1:  # zero pad
+        emb = F.pad(emb, (0, 1), mode='constant')
+    assert emb.shape == (timesteps.shape[0], embedding_dim)
+    return emb
+
+
+class Timestep_emb(nn.Module):
+
+    def __init__(
+            self,
+            input_size,
+            output_size,
+            T,
+            use_motif_timestep=True
+    ):
+        super(Timestep_emb, self).__init__()
+
+        self.input_size = input_size
+        self.output_size = output_size
+        self.T = T
+
+        # get source for timestep embeddings at all t AND zero (for the motif)
+        self.source_embeddings = get_timestep_embedding(torch.arange(self.T + 1), self.input_size)
+        self.source_embeddings.requires_grad = False
+
+        # Layers to use for projection
+        self.node_embedder = nn.Sequential(
+            nn.Linear(input_size, output_size, bias=False),
+            nn.ReLU(),
+            nn.Linear(output_size, output_size, bias=True),
+            nn.LayerNorm(output_size),
+        )
+
+    def get_init_emb(self, t, L, motif_mask):
+        """
+        Calculates and stacks a timestep embedding to project
+
+        Parameters:
+
+            t (int, required): Current timestep
+
+            L (int, required): Length of protein
+
+            motif_mask (torch.tensor, required): Boolean mask where True denotes a fixed motif position
+        """
+        assert t > 0, 't should be 1-indexed and cant have t=0'
+
+        # get the t step embedding
+        t_emb = torch.clone(self.source_embeddings[t.squeeze()]).to(motif_mask.device)
+        # get the zero steo embedding for motif region
+        zero_emb = torch.clone(self.source_embeddings[0]).to(motif_mask.device)
+
+        # timestep embedding for all residues * L
+        timestep_embedding = torch.stack([t_emb] * L)
+
+        # slice in motif zero timestep features
+        timestep_embedding[motif_mask] = zero_emb
+
+        return timestep_embedding
+
+    def forward(self, L, t, motif_mask):
+        """
+        Constructs and projects a timestep embedding
+        """
+        emb_in = self.get_init_emb(t, L, motif_mask)
+        emb_out = self.node_embedder(emb_in)
+        return emb_out
+```
+
+
+
+
+
+### ESMFold code
+
+1. recycle 
+
+> - recycle the backbone atom coordinates from the structure module and output pair and first row MSA representations from the Evoformer. Af2 original use the pair $C_{\beta}$ distance into 15 bins of equal width from 1.25Å to approximate 20Å. Then project this one-hot distogram bin into the pair representation.
+> - slightly  different with af2, this version is more simple
+>
+> 注意linspace num_bins - 1 , 一共有0-num_bins -1 这num_bins个区间
+>
+> ```python
+> def distogram(coords, min_bin, max_bin, num_bins):
+>    # Coords are [... L x 3 x 3], where it's [N, CA, C] x 3 coordinates.
+>    # min_bin :  1.25
+>    # max_bin : 21+3/8
+>    # num_bins : 15
+>     boundaries = torch.linspace(
+>         min_bin,
+>         max_bin,
+>         num_bins - 1,
+>         device=coords.device,
+>     )
+>     boundaries = boundaries**2
+>     N, CA, C = [x.squeeze(-2) for x in coords.chunk(3, dim=-2)]
+>     # Infer CB coordinates.
+>     b = CA - N
+>     c = C - CA
+>     a = b.cross(c, dim=-1)
+>     CB = -0.58273431 * a + 0.56802827 * b - 0.54067466 * c + CA
+>     dists = (CB[..., None, :, :] - CB[..., :, None, :]).pow(2).sum(dim=-1, 	keepdims=True)
+>     bins = torch.sum(dists > boundaries, dim=-1)  # [..., L, L]
+>     return bins
+> 
+
+
+
+
+
+### ProteinMPNN
+
+#### Review : mpnn neural network only for node update
+
+```python
+class MPNNLayer(nn.Module):
+    def __init__(self, num_hidden, num_in, dropout=0.1, num_heads=None, scale=30):
+        super(MPNNLayer, self).__init__()
+        self.num_hidden = num_hidden
+        self.num_in = num_in
+        self.scale = scale
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.ModuleList([Normalize(num_hidden) for _ in range(2)])
+
+        self.W1 = nn.Linear(num_hidden + num_in, num_hidden, bias=True)
+        self.W2 = nn.Linear(num_hidden, num_hidden, bias=True)
+        self.W3 = nn.Linear(num_hidden, num_hidden, bias=True)
+
+        self.dense = PositionWiseFeedForward(num_hidden, num_hidden * 4)
+
+    def forward(self, h_V, h_E, mask_V=None, mask_attend=None):
+        """ Parallel computation of full transformer layer """
+
+        # Concatenate h_V_i to h_E_ij
+        h_V_expand = h_V.unsqueeze(-2).expand(-1,-1,h_E.size(-2),-1)
+        h_EV = torch.cat([h_V_expand, h_E], -1)
+
+        h_message = self.W3(F.relu(self.W2(F.relu(self.W1(h_EV)))))
+        if mask_attend is not None:
+            h_message = mask_attend.unsqueeze(-1) * h_message
+        dh = torch.sum(h_message, -2) / self.scale
+
+        h_V = self.norm[0](h_V + self.dropout(dh))
+
+        # Position-wise feedforward
+        dh = self.dense(h_V)
+        h_V = self.norm[1](h_V + self.dropout(dh))
+
+        if mask_V is not None:
+            mask_V = mask_V.unsqueeze(-1)
+            h_V = mask_V * h_V
+        return h_V
+```
+
+
+
+
+
+### MPNN
+
+- feature
+
+MPNN采样和Ingrahm一样的radia basis function : the fifirst vector is a *distance* encoding  r(·) lifted into a radial basis (We used 16 Gaussian RBFs isotropically spaced from 0 to 20 Angstroms)
+
+```python
+# from esm_if
+def rbf(values, v_min=2.0, v_max=22.0, n_bins=16):
+    """
+    Returns RBF encodings in a new dimension at the end.
+    """
+    rbf_centers = torch.linspace(v_min, v_max, n_bins, device=values.device) #[n_bins]
+    rbf_centers = rbf_centers.view([1] * len(values.shape) + [-1]) #[1,1,1,n_bins]
+    rbf_std = (v_max - v_min) / n_bins
+    v_expand = torch.unsqueeze(values, -1) #[B,L,L,1]
+    z = (values.unsqueeze(-1) - rbf_centers) / rbf_std #[B,L,L,n_bins]
+    return torch.exp(-z ** 2)
+```
+
+$r$ enocide into $r_i = exp(\frac{r-\mu_i}{\sigma})^2$ 其中$\mu_i$ 为每个区间的均值，$\sigma$ 为一个固定的方差
+
+- optimization
+
+For optimization we used Adam with beta1 = 0.9, beta2 = 0.98, epsilon= 10−9, and the learning rate schedule described in (22). Models were trained using pytorch (27), batch size of 10k tokens, automatic mixed precision, and gradient checkpointing on a single NVIDIA A100 GPU. Training and validation losses (perplexities) as functions of optimizer steps are shown in Figure S3D. Validation loss converged after about 150k optimizer steps which is about 100 epochs of on-the-fly sampled training data from 23,358 PDB clusters.
+
+- model 
+
+```python
+# The following gather functions
+def gather_edges(edges, neighbor_idx):
+  	"""
+    给定一个batch数据的边特征,给每个节点取前K个特征
+    这个边特征可以是mask信息,CA之间的距离,N原子之间的距离等等
+    """
+    # Features [B,N,N,C] at Neighbor indices [B,N,K] => Neighbor features [B,N,K,C]
+    neighbors = neighbor_idx.unsqueeze(-1).expand(-1, -1, -1, edges.size(-1))
+    edge_features = torch.gather(edges, 2, neighbors)
+    return edge_features
+
+def gather_nodes(nodes, neighbor_idx):
+    """
+    给每一个batch里的node找到包括自身在内的其他node的特征,输出和gather_edge是一样的
+    输出能狗找到每个节点邻居k个节点的特征
+    """
+    # Features [B,N,C] at Neighbor indices [B,N,K] => [B,N,K,C]
+    # Flatten and expand indices per batch [B,N,K] => [B,NK] => [B,NK,C]
+    neighbors_flat = neighbor_idx.view((neighbor_idx.shape[0], -1))
+    neighbors_flat = neighbors_flat.unsqueeze(-1).expand(-1, -1, nodes.size(2))
+    # Gather and re-pack
+    neighbor_features = torch.gather(nodes, 1, neighbors_flat)
+    neighbor_features = neighbor_features.view(list(neighbor_idx.shape)[:3] + [-1])
+    return neighbor_features
+
+def gather_nodes_t(nodes, neighbor_idx):
+    """
+    在某一个时刻t,找到一个batch里面的前k个节点
+    """
+    # Features [B,N,C] at Neighbor index [B,K] => Neighbor features[B,K,C]
+    idx_flat = neighbor_idx.unsqueeze(-1).expand(-1, -1, nodes.size(2))
+    neighbor_features = torch.gather(nodes, 1, idx_flat)
+    return neighbor_features
+
+def cat_neighbors_nodes(h_nodes, h_neighbors, E_idx):
+    """
+    因为gather_nodes和gather_edges的维度是一样的都是B,L,K,C,将边的信息和点的信息拼接起来
+    应用于E_ij边的信息融合全部的V_J信息
+    """
+    h_nodes = gather_nodes(h_nodes, E_idx)
+    h_nn = torch.cat([h_neighbors, h_nodes], -1)
+    return h_nn
+
+
+
+class EncLayer(nn.Module):
+    def __init__(self, num_hidden, num_in, dropout=0.1, num_heads=None, scale=30):
+        super(EncLayer, self).__init__()
+        self.num_hidden = num_hidden
+        self.num_in = num_in
+        self.scale = scale
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(num_hidden)
+        self.norm2 = nn.LayerNorm(num_hidden)
+        self.norm3 = nn.LayerNorm(num_hidden)
+				
+        # num_in = 2C
+        self.W1 = nn.Linear(num_hidden + num_in, num_hidden, bias=True)
+        self.W2 = nn.Linear(num_hidden, num_hidden, bias=True)
+        self.W3 = nn.Linear(num_hidden, num_hidden, bias=True)
+        self.W11 = nn.Linear(num_hidden + num_in, num_hidden, bias=True)
+        self.W12 = nn.Linear(num_hidden, num_hidden, bias=True)
+        self.W13 = nn.Linear(num_hidden, num_hidden, bias=True)
+        self.act = torch.nn.GELU()
+        self.dense = PositionWiseFeedForward(num_hidden, num_hidden * 4)
+
+    def forward(self, h_V, h_E, E_idx, mask_V=None, mask_attend=None):
+        """ Parallel computation of full transformer layer """
+				# mask_attend [B, N, K,]
+        h_EV = cat_neighbors_nodes(h_V, h_E, E_idx) # [B, N, K, 2C], gather the adjacnet edge E_ij and node V_j info
+        h_V_expand = h_V.unsqueeze(-2).expand(-1,-1,h_EV.size(-2),-1) # [B, N, K, C]
+        h_EV = torch.cat([h_V_expand, h_EV], -1) # [B, N, K, 3C], gather the node V_i and the adjacent edge E_ij and node E_j info
+        h_message = self.W3(self.act(self.W2(self.act(self.W1(h_EV)))))
+        if mask_attend is not None:
+            h_message = mask_attend.unsqueeze(-1) * h_message
+        dh = torch.sum(h_message, -2) / self.scale
+        h_V = self.norm1(h_V + self.dropout1(dh))
+
+        dh = self.dense(h_V)
+        h_V = self.norm2(h_V + self.dropout2(dh))
+        if mask_V is not None:
+            mask_V = mask_V.unsqueeze(-1)
+            h_V = mask_V * h_V
+
+        h_EV = cat_neighbors_nodes(h_V, h_E, E_idx) # [B, N, K, C]
+        h_V_expand = h_V.unsqueeze(-2).expand(-1,-1,h_EV.size(-2),-1)
+        h_EV = torch.cat([h_V_expand, h_EV], -1)
+        h_message = self.W13(self.act(self.W12(self.act(self.W11(h_EV)))))
+        h_E = self.norm3(h_E + self.dropout3(h_message))
+        return h_V, h_E
+
+
+#注意encoder的edge已经发生了变换，不再是encoder中的edge，而是encoder的edge信息+sequence的edge信息
+#E_ij = Concat[E_ij, S_j] * mask_ij + Concat[E_ij, 0.0*S_j] * (1-mask_ij)
+
+
+class DecLayer(nn.Module):
+    def __init__(self, num_hidden, num_in, dropout=0.1, num_heads=None, scale=30):
+        super(DecLayer, self).__init__()
+        self.num_hidden = num_hidden
+        self.num_in = num_in
+        self.scale = scale
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(num_hidden)
+        self.norm2 = nn.LayerNorm(num_hidden)
+				
+        # num_in = 3C
+        self.W1 = nn.Linear(num_hidden + num_in, num_hidden, bias=True)
+        self.W2 = nn.Linear(num_hidden, num_hidden, bias=True)
+        self.W3 = nn.Linear(num_hidden, num_hidden, bias=True)
+        self.act = torch.nn.GELU()
+        self.dense = PositionWiseFeedForward(num_hidden, num_hidden * 4)
+
+    def forward(self, h_V, h_E, mask_V=None, mask_attend=None):
+        """ Parallel computation of full transformer layer """
+
+        # Concatenate h_V_i to h_E_ij (exlusive V_j)
+        h_V_expand = h_V.unsqueeze(-2).expand(-1,-1,h_E.size(-2),-1) # [B, L, K, C]
+        h_EV = torch.cat([h_V_expand, h_E], -1) # [B, L, K, 2C]
+
+        h_message = self.W3(self.act(self.W2(self.act(self.W1(h_EV)))))
+        if mask_attend is not None:
+            h_message = mask_attend.unsqueeze(-1) * h_message
+        dh = torch.sum(h_message, -2) / self.scale
+
+        h_V = self.norm1(h_V + self.dropout1(dh))
+
+        # Position-wise feedforward
+        dh = self.dense(h_V)
+        h_V = self.norm2(h_V + self.dropout2(dh))
+
+        if mask_V is not None:
+            mask_V = mask_V.unsqueeze(-1)
+            h_V = mask_V * h_V
+        return h_V 
+      
+class ProteinMpnn:
+  def __init__(self)
+    # Encoder layers
+    self.encoder_layers = nn.ModuleList([
+        EncLayer(hidden_dim, hidden_dim*2, dropout=dropout)
+        for _ in range(num_encoder_layers)
+    ])
+
+    # Decoder layers,Decoder不改变边信息
+    self.decoder_layers = nn.ModuleList([
+        DecLayer(hidden_dim, hidden_dim*3, dropout=dropout)
+        for _ in range(num_decoder_layers)
+    ])
+    .W_out = nn.Linear(hidden_dim, num_letters, bias=True)
+
+    for p in self.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform_(p)
+  	pass
+  
+  def forward(self):
+    #xxx
+    for layer in self.encoder_layers:
+        h_V, h_E = layer(h_V, h_E, E_idx, mask, mask_attend)
+    # Concatenate sequence embeddings for autoregressive decoder
+    h_S = self.W_s(S)
+    h_ES = cat_neighbors_nodes(h_S, h_E, E_idx)
+    
+		# Build encoder embeddings-constant
+    h_EX_encoder = cat_neighbors_nodes(torch.zeros_like(h_S), h_E, E_idx)
+    h_EXV_encoder = cat_neighbors_nodes(h_V, h_EX_encoder, E_idx)    
+    
+    # Decoder uses masked self-attention (slightly different with permuatation mask )
+    mask_attend = self._autoregressive_mask(E_idx).unsqueeze(-1) #[B,L,K,1]
+    mask_1D = mask.view([mask.size(0), mask.size(1), 1, 1]) #[B, L, 1, 1]
+    mask_bw = mask_1D * mask_attend #[B,L,K,1] --- 对于 j < i 的位点，可以利用序列信息S_j, 同时h_j的节点信息可以随着decoder而改变
+    mask_fw = mask_1D * (1-mask_attend) #[B,L,K,1] --- 对于j>=i 的位点，序列信息S_j为0，且只能用encoder的h_j节点信息
+    
+    h_EXV_encoder_fw = mask_fw * h_EXV_encoder
+    for layer in self.decoder_layers:
+       # Masked positions attend to encoder information, unmasked see. 
+        h_ESV = cat_neighbors_nodes(h_V, h_ES, E_idx) # h_j和h_ES
+        h_ESV = mask_bw * h_ESV + h_EXV_encoder_fw # j<i的汇聚信息h_ESV会改变，但是j>=i的汇聚信息h_EXV总是不会改变
+        h_V = layer(h_V, h_ESV, mask)
+
+    logits = self.W_out(h_V)
+    log_probs = F.log_softmax(logits, dim=-1)
+    return log_probs
+```
+
+
+
+$r_ij$具有causally consistent manner. Decoder的信息每次分为两部分输入
+
+![image-20230322115332053](/Users/sirius/Library/Application Support/typora-user-images/image-20230322115332053.png)
+
+
+
+
+
+### EGNN (Equivariance graph neural network)
+
+- 摘要：提出了E(n)-Equivariant Graph Neural Networks(EGNNs)，不需要high-order reprenstation, 同时对于SE(n), reflection , permutation都是等边的
+
+- 介绍：DL的成功很依赖inductive bias ， 比如CNN里面的translation equivariance, GNN里面permutation equivariance。许多依赖于3D旋转平移对称性的任务比如 point cloud、分子建模、N-body particle simulations 需要SE(3) 或 E(3)等变的网络，最近一些框架使用higher-order representations for intermediate network layers来达到这一目的，具有一些缺点 : 
+
+  > - However, the transformations for these higher-order representations require coefficients or approximations that can be expensive to compute (spherical harmonics)
+  > - Additionally, in practice for many types of data the inputs and outputs are restricted to scalar values (for instance temperature or energy, referred to as type-0 in literature) and 3d vectors (for instance velocity or momentum, referred to as type-1 in literature).
+
+- EGNN :
+
+  - **考虑一张图G=(V,E) , 注意到对于每一个node V_i有一个feature node embedding $h_i \in \R^{nf}$还有一个坐标向量$x_i \in \R^{n}$** Our model will preserve equivariance to rotations and translations on these set of coordinates xi and it will also preserve equivariance to permutations on the set of nodes V in the same fashion as GNNs.
+
+  - 标准的GNN 
+
+    ​	<img src="/Users/sirius/Library/Application Support/typora-user-images/image-20230322141929239.png" alt="image-20230322141929239" style="zoom: 25%;" />	
+
+  - EGNN
+
+  > 主要差别在汇聚信息(3)和更新node coordinate (4)，其中(3)将两个向量的相对平方误差考虑到边的汇聚中, (4)中$x_i$ 可以通过the weighted sum of all relative differences$(x_i-x_j)_{\forall j}$   来更新, $\phi_x : \R^{nf} \rightarrow \R^1$ , $C=\frac{1}{M-1}$
+  >
+  > PS : node embedding $h_i^0$天然需要E(n) invariant 表示信息，之后的$h_{i}^{l}$则一定也是invariant
+
+  - <img src="/Users/sirius/Library/Application Support/typora-user-images/截屏2023-03-22 14.19.01.png" alt="截屏2023-03-22 14.19.01" style="zoom: 50%;" />
+
+  >  ```python3
+  >  class E_GCL(nn.Module):
+  >      """
+  >      E(n) Equivariant Convolutional Layer
+  >      re
+  >      """
+  >  
+  >      def __init__(self, input_nf, output_nf, hidden_nf, edges_in_d=0, act_fn=nn.SiLU(), residual=True, attention=False, normalize=False, coords_agg='mean', tanh=False):
+  >          super(E_GCL, self).__init__()
+  >          input_edge = input_nf * 2 #hi + hj
+  >          self.residual = residual
+  >          self.attention = attention
+  >          self.normalize = normalize
+  >          self.coords_agg = coords_agg
+  >          self.tanh = tanh
+  >          self.epsilon = 1e-8
+  >          edge_coords_nf = 1 #dim ||xi -xj||_2^2 = 1
+  >  
+  >          # mij = phi_e : hi , hj, ||xi -xj||_2^2, a_ij
+  >          self.edge_mlp = nn.Sequential(
+  >              nn.Linear(input_edge + edge_coords_nf + edges_in_d, hidden_nf),
+  >              act_fn,
+  >              nn.Linear(hidden_nf, hidden_nf),
+  >              act_fn)
+  >          
+  >          # h_i = phi_h (hi,mi) 
+  >          self.node_mlp = nn.Sequential(
+  >              nn.Linear(hidden_nf + input_nf, hidden_nf),
+  >              act_fn,
+  >              nn.Linear(hidden_nf, output_nf))
+  >          
+  >          # phi_x (mij) to a scalar
+  >          layer = nn.Linear(hidden_nf, 1, bias=False)
+  >          torch.nn.init.xavier_uniform_(layer.weight, gain=0.001)
+  >  
+  >          coord_mlp = []
+  >          coord_mlp.append(nn.Linear(hidden_nf, hidden_nf))
+  >          coord_mlp.append(act_fn)
+  >          coord_mlp.append(layer)
+  >          if self.tanh:
+  >              coord_mlp.append(nn.Tanh())
+  >          self.coord_mlp = nn.Sequential(*coord_mlp)
+  >  
+  >          if self.attention:
+  >              self.att_mlp = nn.Sequential(
+  >                  nn.Linear(hidden_nf, 1),
+  >                  nn.Sigmoid())
+  >  
+  >      def edge_model(self, source, target, radial, edge_attr):
+  >          if edge_attr is None:  # Unused.
+  >              out = torch.cat([source, target, radial], dim=1)
+  >          else:
+  >              out = torch.cat([source, target, radial, edge_attr], dim=1)
+  >          out = self.edge_mlp(out)
+  >          if self.attention:
+  >              att_val = self.att_mlp(out)
+  >              out = out * att_val
+  >          return out
+  >  
+  >      def node_model(self, x, edge_index, edge_attr, node_attr):
+  >          row, col = edge_index
+  >          agg = unsorted_segment_sum(edge_attr, row, num_segments=x.size(0))
+  >          if node_attr is not None:
+  >              agg = torch.cat([x, agg, node_attr], dim=1)
+  >          else:
+  >              agg = torch.cat([x, agg], dim=1)
+  >          out = self.node_mlp(agg)
+  >          if self.residual:
+  >              out = x + out
+  >          return out, agg
+  >  
+  >      def coord_model(self, coord, edge_index, coord_diff, edge_feat):
+  >          row, col = edge_index
+  >          trans = coord_diff * self.coord_mlp(edge_feat)
+  >          if self.coords_agg == 'sum':
+  >              agg = unsorted_segment_sum(trans, row, num_segments=coord.size(0))
+  >          elif self.coords_agg == 'mean':
+  >              agg = unsorted_segment_mean(trans, row, num_segments=coord.size(0))
+  >          else:
+  >              raise Exception('Wrong coords_agg parameter' % self.coords_agg)
+  >          coord = coord + agg
+  >          return coord
+  >  
+  >      def coord2radial(self, edge_index, coord):
+  >          row, col = edge_index
+  >          coord_diff = coord[row] - coord[col]
+  >          radial = torch.sum(coord_diff**2, 1).unsqueeze(1)
+  >  
+  >          if self.normalize:
+  >              norm = torch.sqrt(radial).detach() + self.epsilon
+  >              coord_diff = coord_diff / norm
+  >  
+  >          return radial, coord_diff
+  >  
+  >      def forward(self, h, edge_index, coord, edge_attr=None, node_attr=None):
+  >          row, col = edge_index
+  >          radial, coord_diff = self.coord2radial(edge_index, coord)
+  >  
+  >          edge_feat = self.edge_model(h[row], h[col], radial, edge_attr)
+  >          coord = self.coord_model(coord, edge_index, coord_diff, edge_feat)
+  >          h, agg = self.node_model(h, edge_index, edge_feat, node_attr)
+  >  
+  >          return h, coord, edge_attr
+  >  ```
+  >
+  > 
+
+  - include momentum
+
+  <img src="/Users/sirius/Library/Application Support/typora-user-images/截屏2023-03-22 14.34.37.png" alt="截屏2023-03-22 14.34.37" style="zoom:33%;" />
+
+  - 相关工作 : **Radiall Field 和EGNN接近, TFN加attention即变成SE3-transformer (spherical hamornics)**
+
+![截屏2023-03-22 14.43.06](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-03-22 14.43.06.png)
+
+Radial Field $r_{ij} = x_i- x_j$, 
+
+TFN instead propagate the node embeddings $h$ but is uses spherical harmonics to compute its learnable weight kernel $W^{lk} : \R ^3 \rightarrow \R^{()(2l+1))(2k+1)}$
+
+
+
+
+
+- **总结 : EGNN首先定义node embedding $h_i$和坐标$x_i$ ，通过radial field 的思想来保证更新过后$x_i'$ equivariant 同时$h_i'$ invariant, 注意$h_i$和$x_i$的信息本质是两个不同的任务 , 生成更关心$x_i$坐标本身的变化，而预测则关心$h_i$的信息**  
+
+
+
+### GVP 
+
+GVP 是在保证每个节点n个 3*1矢量特征等变$\R^{v \times3}$
+
+EGNN是在保证每个节点只有1个矢量特征等变，但这个矢量特征可以是$\R^{n}$
+
+
+
+
+
+
+
+
+
+### SE3-transformer
+
+PS :  AlphaFold IPA 更适合做decoder的任务来搭配single representaion + pair representation + FAPE Loss来生成结构，因为本身IPA输入的frame不会包含刚体内部键长平面角的信息 
+
+
+
+
+
+### Grpaph based protein structure prediction
+
+- 计算二面角：通过四个原子来计算二面角
+
+> 第一个氨基酸没有phi角，最后一个氨基酸没有 psi + omega
+
+![image-20230324151400701](/Users/sirius/Library/Application Support/typora-user-images/image-20230324151400701.png)
+
+```python
+   def _dihedrals(self, X, eps=1e-7):
+        # First 3 coordinates are N, CA, C
+        X = X[:,:,:3,:].reshape(X.shape[0], 3*X.shape[1], 3) # 堆积每个蛋白所有的atom
+
+        # Shifted slices of unit vectors
+        dX = X[:,1:,:] - X[:,:-1,:]
+        U = F.normalize(dX, dim=-1)
+        u_2 = U[:,:-2,:]
+        u_1 = U[:,1:-1,:]
+        u_0 = U[:,2:,:]
+        # Backbone normals
+        n_2 = F.normalize(torch.cross(u_2, u_1), dim=-1)
+        n_1 = F.normalize(torch.cross(u_1, u_0), dim=-1)
+
+        # Angle between normals
+        cosD = (n_2 * n_1).sum(-1)
+        cosD = torch.clamp(cosD, -1+eps, 1-eps)
+        D = torch.sign((u_2 * n_1).sum(-1)) * torch.acos(cosD)
+
+        # This scheme will remove phi[0], psi[-1], omega[-1]
+        D = F.pad(D, (1,2), 'constant', 0)
+        D = D.view((D.size(0), int(D.size(1)/3), 3))
+        phi, psi, omega = torch.unbind(D,-1)
+
+        # print(cosD.cpu().data.numpy().flatten())
+        # print(omega.sum().cpu().data.numpy().flatten())
+
+        # Bond angle calculation
+        # A = torch.acos(-(u_1 * u_0).sum(-1))
+
+        # DEBUG: Ramachandran plot
+        # x = phi.cpu().data.numpy().flatten()
+        # y = psi.cpu().data.numpy().flatten()
+        # plt.scatter(x * 180 / np.pi, y * 180 / np.pi, s=1, marker='.')
+        # plt.xlabel('phi')
+        # plt.ylabel('psi')
+        # plt.axis('square')
+        # plt.grid()
+        # plt.axis([-180,180,-180,180])
+        # plt.show()
+
+        # Lift angle representations to the circle
+        D_features = torch.cat((torch.cos(D), torch.sin(D)), 2)
+        return D_features
+```
+
+
+
+
+
+## 词汇
 
 Monomer：单聚体 Oligomer：寡聚体 Polymer：多聚体
 
@@ -36,7 +1041,7 @@ fluorescent protein 荧光蛋白
 
 cell proliferation, survival, migration, and differentiation     细胞增殖、生存、迁移、分化
 
-
+lyciferase荧光酶
 
 nucleophile    electrophile 	亲核试剂、亲电试剂
 
@@ -247,6 +1252,36 @@ Hydrogen bond is a primarily electrostatic force of attraction between a hydroge
 - Minimization and Equilibration
   - **Equilibration** is a pre-simulation process where you equilibrate the kinetic and potential energies, usually in order to sort out any discrepancies that arose during the heating process (raising temperature of the system from 0kelvin to your set temperature)
   - **Minimization** is an important process that you carry out before your main MD simulation. It is designed to "relax" the system and distribute the energy equally, as weel as place atoms in lower energy positions and let them escape local minima.
+
+
+
+
+
+
+
+
+
+势能 : 由参数确定
+
+自由能 : 物理化学有个概念，一般说的是pMF
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1204,7 +2239,22 @@ MM：描述每个原子之间的动态轨迹
 
 
 
+## 旋转和四元数
 
+1. 学习路径
+   - 定义复数 y = a + bi的向量形式和矩阵形式 表示
+   - 将2D平面的向量和 复数联系到一起
+   - 表示3D空间的旋转 --Rodrigues' Rotation Formula
+   - 定义四元数作为一个群
+     - 四元数不具备交换律
+     - 定义纯四元数和逆、共轭
+     - 将3D旋转写为4元数形式 ----- 任何一个3D空间中的旋转都可以通过4元数来表示
+     - 将4元数旋转写成矩阵的形式，将
+     - 4元数和旋转矩阵的转换
+   - 单位四元数作为 SU2 和旋转矩阵SO3是满射关系，同时是 2-1 满射同态
+   - 四元数插值 
+     - 两个单位四元数的夹角是对应旋转变化量的一半
+     - 插值法 Leap、NLerp、Slerp 本质都是$\alpha_t q_{0}+ \beta_t q_{1}$ 且${\alpha_t + \beta_t = 1}$
 
 
 
@@ -1799,9 +2849,340 @@ MD希望得到一个完整的系综势能面，关注正则系综的平均自由
 
 ### RF diffusion
 
+Q
+
+0. diffusion - basic , RF diffusion is not DDPM while diffusion ?
+   1. CA DDPM
+
+   2. Rotation needs IGSO3 or Diffusion in Riemann manifold
+
+1. self-conditioning
+   1. $\hat{x_0}^t$ 预测不仅仅依赖于$x^{t+1}$还依赖于$\hat{x_0}^{t+1}$ , 预测的是
+
+2. SO3-noise  brown motion 
+3. adjacency block 和 二级结构是怎么定义的？如果和Anand一样不是residue level的话怎么输入给网络？
+4. training details for different models (binder, motif-scaffolding, symmetric)
+   1. 用guidence 加一个score
 
 
 
+
+----
+
+
+
+Why  : Nature has explored only a tiny subset of the possible protein landscape. Evolution does not necessarily select for protein attributes that are desirable from a pharmaceutical/biotechnological perspective (in virto solubility, stability, ease of production, low immunogenicity etc). De novo protien design allows us to derive new proteins with new functions and desirable attributes.
+
+
+
+Workflow:
+
+<img src="/Users/sirius/Library/Application Support/typora-user-images/截屏2023-02-26 15.05.04.png" alt="截屏2023-02-26 15.05.04" style="zoom:50%;" />
+
+
+
+Advances:
+
+with the advent of ML and its application to protein design, there's really been sort of enormous advance in the latter three parts.  We have really extensive evidence now showing if you can get really good recapitulation by for instance AlhpaFold, then your chance of experimental success on a whole range of different problems is really high.
+
+![截屏2023-02-26 15.11.47](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-02-26 15.11.47.png)
+
+
+
+Diffusion models as an attractive framework for protein design
+
+- can generate endlessly diverse outputs (Broadly applicable).
+- can operate directly on amino acid coordinates.
+- can condition on a wide range of inputs, and can be guided with auxiliary potentials.
+
+
+
+How can we learn on protein structures?
+
+- Challenges of Proteins vs Images
+  - Strong geometric constraints (4 backbone heavy atoms, 3covalent bonds, continuous chain)
+  - Must also have a sequence that can encode it. (Not all backbones are encodable by an amino acid sequence)
+- Frame-based representation
+  - It takes advantage of the fact that the geometry of the NCA bond and CAC bond in protein backbones is highly constrained and fixed
+  - Noise on translation and rotation 
+    - noise CA coordinates with 3D gaussian noise
+    - noise rotations with Brownian motion on SO(3)
+
+
+
+![截屏2023-02-26 15.32.23](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-02-26 15.32.23.png)
+
+
+
+![截屏2023-02-26 15.34.25](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-02-26 15.34.25.png)
+
+
+
+diffusion attractive 
+
+- denoising 过程每次预测$\hat{x_0}$ ，充分利用RF 的inductive bias (pre-training 很重要)
+
+
+
+Training Summary
+
+
+
+- Dataset : PDB (< 384 aa; i.e. no cropping), clustered by sequence similarity
+- 200 timesteps (t=0: true structures, t= 200 : 3D Gaussian Ca coordinates, uniform frame rotations)
+- 8x Nvidia A100s, ~4 days 
+  - RosettaFold has 80 million parameters 
+- **Self-conditioning** of predicted X0 structures between timesteps
+- **Fine-tunning** from RoseTAFold structure prediction weights
+  - 利用RosettaFold Inductive bias来fine-tuning RF diffusion
+
+
+
+如果不用self-conditioing, 生成的结构 are not well packed and they are not particularly  diverse
+
+
+
+
+
+Experiment
+
+- Unconditional (与hallucination benchmark )
+
+  - 通过self-consistent RMSD 来评价不同长度的蛋白质设计
+  - TM-score 来评价设计的diversity
+  - RF diffusion captures the ideality of de novo designed proteins (desirable de novo protein propertis)
+    - expressing well
+    - being vert thermostable
+
+
+
+
+
+
+
+- RF diffuison can generate specific protein folds
+
+  - Protein folds can be coarsely described by secondary structure (residue level) & "block adjacency" (residue level)
+    - Train a new model to condition on these 2 things
+    - 二级结构由DSSP训练得到 [L, 4] 表示 (helix, sheet ,loop, mask)
+    - block adjacency  [L, L] one-hot matrix  注意和Anand 的block并不一样，RF diffusion里面的block就是氨基酸level ，$m_{ij} = 1$ 仅当：
+      - i,j 氨基酸的二级结构都不是loop
+      - i,j 氨基酸CA原子距离小于8Å
+  - 根据二级结构信息来采样一整个protein family
+    - e.g. TIM barrel family : sample all different kinds of conformations from the backbone coarse-grained information
+    - e.g. NTF2 Folds
+
+- Symmetric oligomers 
+
+  - RF diffusion 把每次的$x^t$ 对称化
+  - dihedral symmetric 成功率显著的高于RF hallucination
+
+- Functional motif scaffolding  
+
+  - benchmarking success translates to experimental success
+
+  - E.g. p53 helix scaffolding problem
+
+    - BG
+
+      > p53是一种蛋白质，它在人类体内起着重要的抑制肿瘤基因的作用。它的名称是因为它含有一个由与DNA结合的螺旋结构（helix），被称为p53 helix。这个蛋白质可以识别和结合DNA，帮助维持细胞的正常生长和分裂，并在DNA受损时促进细胞进入修复状态或引发细胞凋亡。
+      >
+      > hMdM蛋白是p53的一个调节因子，它可以与p53结合并抑制其功能，从而影响细胞的正常生长和分裂。hMdM蛋白是一种九个外周螺旋（HECT）类的泛素连接酶，可以促进泛素化修饰，并促使p53的降解。
+      >
+      > 癌症通常与p53蛋白或hMdM蛋白的异常有关。例如，某些癌症细胞可能会发生p53基因的突变或缺失，导致p53蛋白的功能异常，从而阻碍细胞的正常生长和分裂，甚至导致细胞癌变。而hMdM蛋白则可以抑制p53的功能，从而促进癌细胞的增殖和转移。因此，p53 helix蛋白和hMdM蛋白都是癌症研究中的重要领域
+
+    - Motivation : 如何可以阻止p53 Helix与Mdm2 的结合，就可以提供新的癌症疗法；希望设计一个新的蛋白和p53 结合，阻止其与Mdm2结合 (600 nanomolar affinity)
+
+- Symmetric metal-binding oligomers (symmetric motif scaffolding)
+
+- De novo binder design (**Multi-chain motif scaffolding problem**)
+
+  - target is a protein
+    - Motif is a target protein that you are trying to bind (the own chain); **we need to design a second chain globular that packs well against this protein**
+  - target is a peptide
+
+
+
+
+
+### Learning to Generate Data by Estimating Gradients of the Data Distribution
+
+score matching -> 等价目标函数 -> denoising score matching or slicing score matching -> langevin dynamics -> Noise Control Score-based Model (NCSM) -> Infinity noise schedule to SDE -> Diffusion
+
+核心：using score functions to represent probability distributions
+
+
+
+Stein score function $\nabla _{x}\log p(x)$ also called scores for gravity
+
+
+
+Objective : $\frac{1}{2} \mathbb{E} _{p_{data}(x)} [||\nabla_{x}\log p_{data}(x)-s_{\theta}(x) ||_2^2]$ which is called fisher divergence  外面的P data 可以通过蒙特卡洛模拟解决，里面的没有办法，只能继续推导，利用一些general的假设得到优化目标不包含ground truth distribution的解析解
+
+- we can use an old method called score matching (integration by parts) to convert the fisher divergence into the following equivalent objective. IN this equivalent objective there is no dependency on the data score function
+
+Score Matching
+$$
+\mathbb{E}_{p_{data}(x)} [\frac{1}{2}||s_{\theta}(x)||_2^2 + tr(\nabla _x s_{\theta}(x))] \\
+\approx \frac{1}{N}\sum_{i=1}^N [\frac{1}{2}||s_{\theta}(x_i) ||_2^2+ tr (\nabla _x s_{\theta}(x_i))]
+$$
+
+- computational challenge of score matching can boil down to the jacobian matrix.
+
+
+
+Langevin dynamics 每一步都在不同的noise sacle上进行采样，T越大，越随机；如果直接采样的话，low-density region score function并不准确
+
+- 直接用score matching + Langevin dynamics 效果很差；主要是因为每个样本都是high probability region，周围low probability region 的 scrore function并不准确，所以initial structure后并不能采样到有效的样本
+- 给data加入不同scaling的noise，这样整体的数据分布逐渐变得平缓，score function在输入不同的噪音的条件下都能进行langevin dynamics采样得到合理概率分布的样本
+
+
+
+总结 Score-based generative modeling 
+
+- Flexible models ----- 因为输出的东西不用归一化为1个概率，所以模型可以非常复杂
+  - Bypass the normalizing constant  (引入score function)
+  - Principled statistical method (最优化score function 等价优化一个相同的目标函数)
+
+- Improved generation
+
+  - Higher sample quality than GANS (绕过了flow model的模型限制，可以给很复杂的模型)
+
+  - Controllable generation (with bayesian rule and classifier)
+
+    > p(x)是对图片的概率生成, uncondition generative
+    >
+    > p(y|x) 是classifier generation , also called forward model
+
+    
+
+- Probability evalution
+
+  - with sde 
+
+
+
+Weakness
+
+- speed
+- there is no natural latent space with lower dimensionality, it is hard to get a representation
+
+
+
+
+
+### Diffusion and Score-Based Generative Models
+
+Deep generative model
+
+- Explicit : Estimating the probability distribution of data
+  - approximating the normalizing constant 
+    - Energy-based models (inaccurate )
+    - Flow
+  - Score-based (estimate the score function)
+- Implicit : GAN (can't evaluate probabilities)
+
+
+
+From fisher divergence to score matching etc.
+
+- naive fisher divergence  $\frac{1}{2} \mathbb{E} _{p_{data}(x)} [||\nabla_{x}\log p_{data}(x)-s_{\theta}(x) ||_2^2]$
+- score matching  $\mathbb{E}_{p_{data}(x)} [\frac{1}{2}||s_{\theta}(x)||_2^2 + tr(\nabla _x s_{\theta}(x))]$ 
+  - score matching计算需要1次forward运算得到$s_{\theta}(x)$, 再依次对$s_{\theta}(x)$的每一个维度$s_{\theta}(x_i)$进行反向传播 （反向传播理论上是标量 对向量或矩阵求导）
+  - 共计1次forward + Dimension 次 backward, naive score matching is not scalable
+
+- Slicing score matching : 利用随机投影来重写Fisher divergence，绕过Jacobin矩阵的计算
+  - Sliced Fisher Divergence : $\frac{1}{2}\mathbb{E}_{p_v} \mathbb{E} _{p_{data}(x)} [||\bold{v}^T\nabla_{x}\log p_{data}(x)-\bold{v}^T s_{\theta}(x) ||_2^2]$
+  - Sliced Score Matching : $\mathbb{E_{p_v}}\mathbb{E_{p_{data}(x)}}[\bold{v}^T \nabla _x s_{\theta}(x) \bold{v} + \frac{1}{2}(\bold{v}^Ts_{\theta}(x))^2]$
+    - 不需要计算Jaccobian trace，只需要计算Jacobin  二次型内积 ，只需要计算1次backprop
+    - 将梯度与内积结合 $\bold{v}^T \nabla _x s_{\theta}(x) \bold{v} = \bold{v}^T \nabla _x (\bold{v}^Ts_{\theta}(x) )$
+  - $\bold{v}^T$  is a projection direction, $p_v$  is the distribution of this projection directions
+    - projection distribution $p_v$ is typically Gaussian or Rademacher distribution
+
+- Denoising score matching  : 直接利用denoising score matching来估计$p_{data}$
+
+  - $p_{data}(x) -> q_{\sigma}(\hat{x}|x) -> q_{\sigma}(\hat{x})$
+
+  - $\hat{x} = x + \sigma^2 I$
+
+  - 缺点：
+
+    - 估计的实际是noise distribution而不是noise-free distributions
+    - 如果降低noise , variance就会变得非常大
+
+    ![截屏2023-02-27 23.09.58](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-02-27 23.09.58.png)
+
+    ![image-20230227232556128](/Users/sirius/Library/Application Support/typora-user-images/image-20230227232556128.png)
+
+
+
+- Sampling from score functions : Langevin dynamics
+
+  - 如果只按按照score function的方向，所有的样本最终都会坍塌到概率最大的点
+  - 使用langevin dynamics在一定条件下可以保证生成这些$p_{x}$的样本
+
+  ![image-20230227233705471](/Users/sirius/Library/Application Support/typora-user-images/image-20230227233705471.png)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Diffusion-IPA
+
+
+
+
+
+### EWSC: Protein design using deep learning, David Baker
+
+- physically based model
+  - binder  to folded proteins (cytokine receptor)
+  - binder to more flexible molecules
+    - Design strategy for binding amyloid forming peptides
+- protein design using deep learning
+  - simple RL : Monto Calo Tree
+  - RF fine tuneing 
+    - **IPA and Triangle attention** are not critical
+    - **FAPE and recycling are**
+  - Protein/NA complexes with RF2
+  - RoseTTAFOld All-atom
+  - LigandMPNN : Incorporating lignad context for protein sequence design
+  - Inpainting 
+    - deterministic
+    - fail in small description
+  - RF diffusion
+
+
+
+### OpenFold : Lesson learned and insights gained from rebuilding and retraining AlphaFold2
+
+  why
+
+- Because of the fact that training code is very entangled into kind of the Google infrasturcture system, **they did not release the training code.**
+- Three initial motivations
+  - full scale retraining (for new applications)
+  - modular components (in PyTorch)
+  - Knowledge acquisition / reproduce DeepMind's results
+    - openfold faster than af2 as code is more plex 
+    - **pytorch模型极快的速度就能收敛, fine-tuning 阶段主要解决physical violations 很贵**
 
 ## 文献中的生物实验
 
