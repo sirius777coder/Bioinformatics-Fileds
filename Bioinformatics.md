@@ -1,8 +1,61 @@
-# Biochemistry  
+# Bioinformatics  
 
 [toc]
 
 ## Deep Lerning Blocks
+
+### System
+
+预备知识：
+
+常见的backend通讯方式：MPI、NCCL
+
+1. NCCL operations
+
+All, reduce , gather
+
+- AllReduce
+
+The AllReduce operation is performing reductions on data (for example, sum, max) across devices and writing the result in the receive buffers of every rank.
+
+**The AllReduce operation is rank-agnostic**. Any reordering of the ranks will not affect the outcome of the operations.![截屏2023-04-22 16.36.33](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-04-22 16.36.33.png)
+
+- Brodcast
+
+The Broadcast operation copies an N-element buffer on the root rank to all ranks.
+
+Important note: The root argument is one of the ranks, not a device number, and is therefore impacted by a different rank to device mapping.![截屏2023-04-22 16.37.26](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-04-22 16.37.26.png)
+
+
+
+- Reduce
+
+The Reduce operation is **performing the same operation as AllReduce, but writes the result only in the receive buffers of a specified root rank.**
+
+Important note : The root argument is one of the ranks (not a device number), and is therefore impacted by a different rank to device mapping.
+
+PS : Reduce + Brodcast = AllReduce
+
+![截屏2023-04-22 16.38.37](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-04-22 16.38.37.png)
+
+
+
+- AllGather
+
+In the AllGather operation, each of the K processors aggregates N values from every processor into an output of dimension K*N. The output is ordered by rank index.
+
+![截屏2023-04-22 16.44.33](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-04-22 16.44.33.png)
+
+The AllGather operation is impacted by a different rank or device mapping since the ranks determine the data layout.
+
+
+
+#### Megatron-LM
+
+- 提出了一种单机多卡的模型并行（层内张量并行）的方法，非常简单；只能针对标准架构的Transformer设计，比如GPT2和Bert
+- 对MLP、Multihead Attention、Embedding分别进行了模型的拆分，核心思想是矩阵分块
+
+
 
 ### Attention is all you need
 
@@ -142,6 +195,148 @@ Basic Blocks
 
 
 
+### Codex
+
+**Q1 : average log p是推理的时候直接拿来，还是拿推理的序列进行teacher forcing forward 计算perplexity** 
+
+> ProGPT2, ProteinMPNN, Graph transformer,ESM inverse folding 评估生成序列的 mean log probability 都是拿采样的序列再重复做一次forward, 生成N条序列：sample 函数 N次，forward函数N次（teacher forcing）
+>
+> ```python3
+> sequence = model.sample(x) #[B,N]
+> batch , seuqnce_len = sequence.size()
+> ntokens = 20
+> with torch.no_grad():
+>   model = model.eval()
+>   logits = model(x, sequence) #[B, N, 20]
+>   loss = CrossEntropy(logits.reshape(-1,ntokens), logits.reshape(-1))  #计算token层面的loss, 先平均batch和token, 再计算teacher forcing的损失函数
+> ppl = torch.exp(loss)
+> ```
+
+总结：利用GPT + 爬取的github公开数据集(docstring + code)
+
+1. **微调不一定会带来精度上的提高，但是大部分时候都会让模型的收敛的更快, 所以能微调还是尽量微调**
+
+2. Codex选取来164个任务(Human Eval)，利用pass@k的方法来表示正确率，即对于每个任务生成k条代码，有1条能通过任务就可以，如果反复生成k个方法取评价，那么这个分数variance会非常大
+
+   - 作者来估算pass@k:   先在每个任务生成n个样本  $n\ge k$ (论文里选了n=200) ,利用一个无偏估计的期望来计算 : 1个问题生成n个答案，有c个是正确的，假设每次抽取k个，则$\frac{\binom{n-c}{k}}{\binom{n}{k}}$ 表示选取的k个答案没有一个是正确答案的结果, $1-\frac{\binom{n-c}{k}}{\binom{n}{k}}$  表示选取的k个答案存在正确答案的概率
+
+   ![截屏2023-03-31 23.10.11](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-03-31 23.10.11.png)
+
+   对于这个二项式计算，整数的相乘很容易超出计算机内定义的范围，作者进行化简来避免数值问题
+   $$
+   1-\frac{\binom{n-c}{k}}{\binom{n}{k}}=1-\frac{(n-c)!}{k!(n-c-k!)}\times\frac{k!(n-k)!}{n!}=1-\frac{(n-c)!(n-k)!}{(n-c-k)!n!}=1-\Pi_{i=n-c+1}^{n} \frac{1}{i} \times \Pi_{i=n-c-k+1}^{n-k}i
+   $$
+   统一后两项的下标$1-\Pi_{i=n-c+1}^{n} \frac{1}{i} \times \Pi_{i=n-c-k+1}^{n-k}i=1-\Pi_{i=n-c+1}^{n}\frac{i-k}{i}$
+
+   ```python
+   def pass_at_k(n,c,k):
+     """
+     np format pass@k numerical stable computation
+     """
+     if n - c < k : return 1.0 #every time 
+   	return 1.0 - np.prod(1.0 - k/np.arange(n-c+1,n+1))
+   ```
+
+   
+
+3. 采样的方法：top k sample, nucleus sample top p (加起来的概率大于p之后丢弃其他选项，保证多样性的同时避免了很不靠谱的答案)
+
+4. 如果允许采样的数目比较少，温度低一点好；采样的数目比较多，温度高一点好
+
+5. **采样出来之后利用avetage log p进行排序**
+
+6. Codex 的微调并不是在最后换一个线性头，而是针对同一个任务同一个语言模型同一个损失函数，只不过数据集变成了代码问答数据集而不是Github爬取的数据集
+
+
+
+### AlphaCode
+
+**Q1 : 头数目不一样怎么做到的?**
+
+- **非标准的attention, key-value的头和query的头数量不一样, 有效的提高了运行速度**
+- 解码器是编码器的6倍
+- DeepMind 习惯使用一个学习的网络来评估生成结果的置信度： Value Conditioning and predcition
+  - 数据集有正确的答案，有错误的答案，训练的时候把正确与否当成一个tag进行输入，同时输出一个预测的二分类正确与否
+  - 采样的时候tag全部设置为正确答案，过滤的时候只考虑那些生成答案为正确 的结果
+- AlphaCode的采样和排序 
+  - 采样 : 标准的random sample (相比较Codex每个问题生成10-100个答案，AlphaCode可能一次会生成1M个答案，所以已经能够保证采样的多样性了，因此温度也设置的比较低T=0.1)
+  - 排序：预测的结果首先为正确，再通过强化学习进行判断 
+
+### MoCo
+
+Momentum Contrast for Unsupervised Visual Representation Learning
+
+总结：利用单模态图片的未标注的数据集，通过对比学习进行无监督预训练，在下游任务上的表现超过了ImageNet有监督预训练任务
+
+对比学习：只要定义好代理任务（什么是正负样本）+ Loss 函数（如何处理正负样本的Loss）
+
+- 目前大部分的对比学习任务，主要受限于字典的大小 + key encoder有效性上
+
+- End-to-End 同时更新encoder + key encoder
+
+  - 每次字典的大小为mini-batchsize大小
+
+  > 对于谷歌不是问题，TPU的使用可以无限增大batch size的大小 
+
+  - 优点是key encoder可以实时更新，字典的值也可以实时更新，有效性比较高
+
+- memory bank
+
+  - 不考虑key encoder，提前用一个预训练好的网络得到所有key encoder特征，每次随机sample一些特征作为副样本
+
+- Moco
+
+  - 创立一个queue 来存储negative key的大小，将mini-batchsize和字典的大小分离开，同时由于队列FIFO的特点，去除队列的特征往往是比较老的特征，以及失去了一致性
+  - 由于queue 的使用导致key encoder模型无法求梯度，尝试直接将encoder参数直接拷贝给key encoder
+  - 利用动量的方法来更新key encoder $\theta_k = m\theta_k + (1-m)\theta_q$ ，使得队列里整体的正负样本 具有很好的一致性
+  - other
+    - Loss函数相当于一个 (K+1) 类的softmax (controlled by temperature)
+
+
+
+![image-20230330120249015](/Users/sirius/Library/Application Support/typora-user-images/image-20230330120249015.png)
+
+
+
+idea : 目前很火的方向更多是在考虑机器学习任务本身、Loss函数的设置、推理样本的生成等等，对模型架构的关心反而更少
+
+```python
+# f_q, f_k: encoder networks for query and key
+# queue: dictionary as a queue of K keys (CxK)
+# m: momentum
+# t: temperature
+f_k.params = f_q.params # initialize
+for x in loader: # load a minibatch x with N samples
+   x_q = aug(x) # a randomly augmented version
+   x_k = aug(x) # another randomly augmented version
+   q = f_q.forward(x_q) # queries: NxC
+   k = f_k.forward(x_k) # keys: NxC
+   k = k.detach() # no gradient to keys
+   # positive logits: Nx1
+   l_pos = bmm(q.view(N,1,C), k.view(N,C,1))
+   # negative logits: NxK
+   l_neg = mm(q.view(N,C), queue.view(C,K))
+   # logits: Nx(1+K)
+   logits = cat([l_pos, l_neg], dim=1)
+   # contrastive loss, Eqn.(1)
+   labels = zeros(N) # positives are the 0-th
+   loss = CrossEntropyLoss(logits/t, labels)
+   # SGD update: query network
+   loss.backward()
+   update(f_q.params)
+   # momentum update: key network
+   f_k.params = m*f_k.params+(1-m)*f_q.params
+   # update dictionary
+   enqueue(queue, k) # enqueue the current minibatch
+   dequeue(queue) # dequeue the earliest minibatch
+```
+
+
+
+
+
+
+
 
 
 ### CLIP
@@ -278,11 +473,11 @@ Basic Blocks
 
     > - 具体证明过程是考虑到score function和epsilon的关系 $ s_{\theta}(x_t,t)= -\frac{\hat{\epsilon}(x_t,t)}{\sqrt{1-\overline{\alpha_t}}}$ ，如果score变成了条件概率分布的score，则对应的高斯分布的噪音可以通过$-\sqrt{1-\overline{\alpha_t}} s_{\theta}(x_t,t | y)$ 来生成对应的概率分布的噪音
     >
-    > - 缺点：虽然训练不受影响，但是需要一个外界的guidance，比如在noised ImageNet上训练一个预测加噪图片的分类器，还是不太方便
+    > - 缺点：虽然训练不受影响，但是需要一个外界的guidance，比如在**noised ImageNet**上训练一个预测加噪图片的分类器，还是不太方便
 
     - **classifier-free guidance ** : 训练模型时以一定的概率加入引导生成，推理时全部加入引导生成；这样通过一次diffusion模型训练就可以得到两种不同的概率分布
 
-      - 网络在训练的时候同时见过两种输入：一种是有引导的$\hat{\epsilon}(x_t,t,y)$, 另一种是完全没有引导的 $\hat{\epsilon}(x_t,t,\phi)$, $\phi$ 表示在训练的时候按照一定的比例drop掉classifier 信息为空集 (不是mask是drop) 
+      - 网络在训练的时候同时见过两种输入：一种是有引导的$\hat{\epsilon}(x_t,t,y)$, 另一种是完全没有引导的 $\hat{\epsilon}(x_t,t,\phi)$, $\phi$ 表示在训练的时候**按照一定的比例drop**掉classifier 信息为空集 (不是mask是drop) 
       - 推理时：给网络两种不同的输入， 对结果进行组合$\overline{\epsilon}_{\theta}(x_t,t,y) = (1+\omega)\epsilon_{\theta}(x_t,t,y) - \omega \epsilon_\theta (x_t,t)$![截屏2023-03-25 21.06.54](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-03-25 21.06.54.png)
       - 缺点：虽然只用训练一个模型，但对训练难度比较高，希望模型具有两种不同的输出而不被confused，对于大公司而言无所谓
       - 注意：这个引导$y$ 可以有很多个向量张量组成
@@ -364,6 +559,12 @@ Basic Blocks
 - DALLE2 不足和局限性
   - 不能把物体和属性结合起来 : CLIP模型训练的时候只有相似性
   - 直接生成文字做的不好
+
+
+
+
+
+## Ai4S
 
 
 
@@ -461,7 +662,29 @@ class Timestep_emb(nn.Module):
 
 
 
+
+
+
+
 ### ESMFold code
+
+MSA transformer 和 ESM-1v用来预测variant effects :
+
+输入一个wild type + 一个mutated type ----- 输出
+
+> - ESM-MSA 1b 使用UR50 +MSA数据训练了一个MSA transformer 模型，可以用来提取MSA embedding信息
+>
+> - ESM-1v ，与ESM-1b相同的模型架构但是用了UR90数据集 来预测序列突变对功能的影响
+
+ESM-1v 利用masked language model的特点  : 
+
+We score mutations using the log odds ratio at the mutated position, assuming an additive model when multiple mutations T exist in the same sequence:
+$$
+\sum\limits_{t\in T}\log p(x_{t}=x_t^{mt} | x_{\textbackslash T}) - \log p( x_{t} =x_{t}^{wt}|x_{\textbackslash T} )
+$$
+T是所有的突变位点, 如果是突变组合则利用log加和性质
+
+
 
 1. recycle 
 
@@ -489,10 +712,56 @@ class Timestep_emb(nn.Module):
 >     c = C - CA
 >     a = b.cross(c, dim=-1)
 >     CB = -0.58273431 * a + 0.56802827 * b - 0.54067466 * c + CA
->     dists = (CB[..., None, :, :] - CB[..., :, None, :]).pow(2).sum(dim=-1, 	keepdims=True)
+>     dists = (CB[..., None, :, :] - CB[..., :, None, :]).pow(2).sum(dim=-1, 	keepdims=True) #[B,L,L,1]
 >     bins = torch.sum(dists > boundaries, dim=-1)  # [..., L, L]
 >     return bins
 > 
+
+2. add <eos> token and <bos> token
+
+先给整体index加1个padding index ; 再添加开头和结尾两个token
+
+esm中0代表bosi, 1代表padding index, 2代表eosi (第一个padding token为)
+
+```python3
+class ESMFold:
+  	def __init__(self):
+      pass
+  
+  @staticmethod
+    def _af2_to_esm(d: Alphabet):
+        # Remember that t is shifted from residue_constants by 1 (0 is padding).
+        esm_reorder = [d.padding_idx] + \
+            [d.get_idx(v) for v in residue_constants.restypes_with_x]
+        return torch.tensor(esm_reorder)
+
+    def _af2_idx_to_esm_idx(self, aa, mask):
+        aa = (aa + 1).masked_fill(mask != 1, 0) #[B, L] token shifted right for padding token
+        return self.af2_to_esm[aa]
+
+    def _compute_language_model_representations(self, esmaa: torch.Tensor) -> torch.Tensor:
+        """Adds bos/eos tokens for the language model, since the structure module doesn't use these."""
+        batch_size = esmaa.size(0) 
+        # esmaa [B,L]
+
+        bosi, eosi = self.esm_dict.cls_idx, self.esm_dict.eos_idx
+        bos = esmaa.new_full((batch_size, 1), bosi) #[B,1] full with bosi
+        eos = esmaa.new_full((batch_size, 1), self.esm_dict.padding_idx) #[B,1] full with padding_idx as we may not know the exact length of each token
+        esmaa = torch.cat([bos, esmaa, eos], dim=1) #[B,L+2]
+        # Use the first padding index as eos during inference.
+        esmaa[range(batch_size), (esmaa != 1).sum(1)] = eosi #[B,L+2],设置第一个padding token为eos token (padding token都在句子末尾)
+ 
+        res = self.esm(
+            esmaa,
+            repr_layers=range(self.esm.num_layers + 1),
+            need_head_weights=False,
+        )
+        esm_s = torch.stack([v for _, v in sorted(
+            res["representations"].items())], dim=2)
+        esm_s = esm_s[:, 1:-1]  # B, L, nLayers, C
+        logits = res['logits']
+        return esm_s, logits
+```
 
 
 
@@ -1005,6 +1274,98 @@ PS :  AlphaFold IPA 更适合做decoder的任务来搭配single representaion + 
 
 
 
+## Python basic
+
+### numpy indexing
+
+numpy 使用了标准的python 索引语法  : x[obj] ; x是array, obj表示选择
+
+x[(exp1,exp2,...,expN)] 等价于 x[epx1,exp2,exp3...,expN] 后者只是一种语法糖
+
+(exp1, exp2, ... , expN) 被称为选择元组 selection tuple
+
+#### Basic Indexing
+
+- single element indexing
+
+  - 0 based 索引
+  - 接受负数索引
+  - 如果对于一个多维数组的索引小于dimension, 则会返回一个子数组(subdimensional array)。返回的子数组是一个视图, 所以我们通常可以通过对子数组的指定来改变 原数组 e.g.  对于Transformer position encoding
+
+  ```python
+  pe[:,0::2] = torch.sin(position * div_term) # broadcast : [max_len, 1]* [d_model/2] -> [max_len, d_model/2] 
+  pe[:,1::2] = torch.cos(position * div_term)
+  ```
+
+  - 对于一个多维度的数组，**没有必要**每个维度index都加一个括号比如 `x[0][2]`, 加一个括号就行了`x[0,2]`  后者是更有效的方式
+
+  > Numpy 使用了C语言风格的按行索引 (Row-major )，或者说最后一个维度索引通常对应了变化最快的内存位置. 这与Fortran 和 MATLAB按列索引不相同 (Column-Major)
+
+- Slicing and striding
+
+将python对于array的切片扩展到了N维度上. 基本的索引语法 `start:stop:step`  对应 `i:j:k` , start 可以选到，stop无法选到
+
+slicing 同样支持负数索引
+
+如果`i` 没有给出，则为`:j:k` 表示i=0 if k > 0 or i= n-1 if k < 0 
+
+如果`j` 没有给出，则为`i::k` 表示j = n if k >0 
+
+如果`k` 没有给出默认为1
+
+- Dimensional indexing tools
+
+  - `:`表示某一个维度的所有值
+  - `...` ellipsis 表示扩展selection tuple 到 x.ndim
+  - `np.newaxis` `None` 主动在某个维度添加一个轴
+
+  最明显的作用：
+
+```python
+mask_1D = np.array([1,1,1,0,0])
+mask_2D = mask_1D[...,None] * mask_1D[...,None,:]
+```
+
+
+
+#### Advanced indexing
+
+当selection object不再是一个tuple的时候，是一个ndarray (data type integar or bool) , 或者是一个tuple object包含ndarray. 有两种高级索引的方式: integar and Boolean
+
+
+
+高级索引返回的是原有数据的一个拷贝而像basic slicing 一样返回一个视图.
+
+
+
+> x[(1,2,3), ]将触发高级索引;
+>
+> x[(1,2,3)]表示basic indexing 等价于x[1,2,3]
+
+
+
+- **Integer array indexing**
+
+假设现在有一个array A 和 index array B  和假定最终的index结果array C
+
+C的形状和B形状相同, C的每一个值都是 拿B的值去当索引 去A里面取
+
+
+
+- Boolean array indexing
+
+#### Field access
+
+
+
+
+
+
+
+
+
+
+
 
 
 ## 词汇
@@ -1298,7 +1659,7 @@ Hydrogen bond is a primarily electrostatic force of attraction between a hydroge
 - Threonine 苏氨酸
 - Phenylalanine 苯丙氨酸  F
 - Tyrosine 酪氨酸 Y
-- Tryptophan 色氨酸 N (吲哚)
+- Tryptophan 色氨酸 W (吲哚)
 
 - Aspartate 天冬氨酸 D
 - Glutamate 谷氨酸 E
@@ -1308,7 +1669,7 @@ Hydrogen bond is a primarily electrostatic force of attraction between a hydroge
 
 - Cysteine 半胱氨酸 C
 
-- Methionine 甲硫氨酸
+- Methionine 甲硫氨酸 M
 
 - Lysine 赖氨酸 K
 - Arginine 精氨酸 R
