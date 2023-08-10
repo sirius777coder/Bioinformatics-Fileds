@@ -1647,12 +1647,12 @@ Hydrogen bond is a primarily electrostatic force of attraction between a hydroge
     - $\frac{F}{m}=a$ 
     - 使用timestep (e.g. 1fs)和加速度来计算出速度和坐标
 
-<img src="/Users/sirius/Library/Application Support/typora-user-images/image-20230222164202942.png" alt="image-20230222164202942" style="zoom: 25%;" />
+<img src="/Users/sirius/Library/Application Support/typora-user-images/image-20230222164202942.png" alt="image-20230222164202942" style="zoom: 67%;" />
 
 - 主要的几个文件：
-  - PDB file
+  - PDB file (坐标文件)
   - parameters file
-  - PSF file
+  - PSF file : Topology (原子类型，连接方式，化学键)
 
 <img src="/Users/sirius/Library/Application Support/typora-user-images/截屏2023-02-24 20.29.51.png" alt="截屏2023-02-24 20.29.51" style="zoom: 33%;" />
 
@@ -1699,7 +1699,7 @@ Hydrogen bond is a primarily electrostatic force of attraction between a hydroge
 
 势能 : 由参数确定
 
-自由能 : 物理化学有个概念，一般说的是pMF
+自由能 : 物理化学有个概念，一般说的是pMF，自由能在玻尔兹曼分布中和概率分布紧密相关
 
 
 
@@ -1707,13 +1707,40 @@ Hydrogen bond is a primarily electrostatic force of attraction between a hydroge
 
 
 
+### Gromacs-tutorial
+
+基本的二进制命令 gmx
+
+基本的三个文件
+
+- .gro文件，里面存储了MD计算坐标的对象，包含了蛋白质的构象，小分子构象，溶剂构象和电中和离子等; 后续进行坐标更新都是对这个文件进行更新
+- .top文件，包含了蛋白结构文件中: bonds, pairs , angles, dihedrals以及加载的力场文件，水模型文件
+- posre.itp 限制重原子坐标的文件
+
+
+
+**流程**
 
 
 
 
 
+- 能量最小化：消除不合理的构象和空间位阻，使得蛋白和溶剂分子的取向比较合理
+  - grompp (pre-processing) 将结构，拓扑，模拟参数进入一个二进制的输入文件.tpr , -f mini.mdp文件是一个额外的控制输入的文件，表示相关参数 `gmx grompp -f mini.mdp -c 1AKI_solv_ions.gro -p topol.top -o em.tpr`
+  - mdrun来进行EM操作 `gmx mdrun -deffnm em`
 
+- Equilibration : 平衡蛋白质附近的溶剂和离子
 
+  - 使用posre.itp文件，对于蛋白质的重原子施加一个位置受限力 position restraints，用来平衡溶剂和蛋白质
+
+  - 一般是两个阶段的平衡
+
+    - 第一阶段平衡NVT ensemble ，正则系综主要是为了达到温度在目标值附近平衡，一般是50-100ps，也是先生成tpr的文件再进行mdrun 
+      - `gmx grompp -f nvt.mdp -c em.grop -r em.gro -p topol.tio -o nvt.tpr`
+      - `gmx mdrun -deffnm nvt`
+    - 第二阶段平衡气压或者密度, 一般是NPT系综，最接近实验值的条件
+
+    > 注意nvt.mdp和npt.mdp就是控制两次平衡的参数文件，
 
 
 
@@ -3211,7 +3238,7 @@ UM-TBM server
 
 
 
-### 基于集合变量到增强采样算法
+### 基于集合变量的增强采样算法
 
 为什么做增强采样？---某些统计量趋于稳定是否代表着模拟时间足够反应是否平衡了？
 
@@ -3233,13 +3260,23 @@ UM-TBM server
 
 - 不依赖集合变量的增强采样算法 
 
-  - Accelerated MD (AMD) : 修改势能面，降低反应能垒
+  - Accelerated MD (AMD) : 修改势能面，降低反应能垒，加快事件的发生
 
-    PS : 只加速了由能量驱动的采样过程
+    PS : 只加速了由能量驱动的采样过程，并未加速由熵驱动的过程
 
-  - Replica-exchange MD (REMD)
-
-    PS : 模拟不可控，操作比较简单，只需要修改config配置文件
+    > 能量驱动：MD中每个原子的运动轨迹受到了牛顿力学的影响
+    >
+    > 熵驱动：每个原子除了受到相应的力之外，还受到了随机力或随机扰动来增加系统的熵，帮助系统跳出能量举办最小点，更好的探索构象空间。E.g. 朗之万动力学等引入随机力和耗散力来改变系统的熵
+  
+  - Replica-exchange MD (REMD)：跑多个不同温度的副本，通过一定概率将高温下的构象交换到低温下，即使我们只关心低温下的构象我们也能拿到更广阔蛋白空间的构象
+  
+    PS : 操作比较简单，只需要修改config配置文件，不需要人为指定集合变量；操作不可控，无法保证感兴趣的事情一定会发生
+    
+    > Gromacs :
+    >
+    > **Replica exchange molecular dynamics (REMD) is a method that can be used to speed up the sampling of any type of simulation, especially if conformations are separated by relatively high energy barriers. It involves simulating multiple replicas of the same system at different temperatures and randomly exchanging the complete state of two replicas at regular intervals with the probability:**
+    
+    
 
 ![截屏2023-02-20 14.11.35](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-02-20 14.11.35.png)
 
@@ -3251,12 +3288,12 @@ UM-TBM server
 
     - 反映坐标：描述感兴趣过程中的变量，一般未知且维度很高
     - 反映坐标模型：模拟中“假定”的反应坐标，由一个或多个集合变量构成
-    - 集合变量
+    - 集合变量：假定可以描述体系某种运动模式的几何变量
     - 自由能面：沿着反应坐标模型的自由能变化
 
   - 增强采样方法 :
 
-    原理：沿着反应坐标方向施加偏执力，加速沿某方向的运动
+    原理：沿着反应坐标模型方向施加偏执力，加速沿某方向的运动
 
     - Umbrella Sampling (US) 伞状采样
     - Metadynamics (MtD)
@@ -3620,6 +3657,46 @@ From fisher divergence to score matching etc.
     - openfold faster than af2 as code is more plex 
     - **pytorch模型极快的速度就能收敛, fine-tuning 阶段主要解决physical violations 很贵**
 
+
+
+### AF-cluster
+
+metamorphic proteins or fold-switching proteins
+
+#### 几种常见的构象变换
+
+- Domain motion
+
+Adenylate Kinase : recycline ATP
+
+- Metamorphic proteins
+
+RfaH transcription factor : C from helical to beta barrel
+
+#### Metamorphic proteins : benchmarks for conformational change
+
+RfaH : transcription/translatetion factor, E.coli
+
+Mad2 : cell cycle checkpoint, H.sapies
+
+默认的AlphaFold2配置不发预测portion  fold switching 
+
+
+
+KaiB protein : fold-switcher to regulate circadian rhythms
+
+  ![image-20230721142408283](/Users/sirius/Library/Application Support/typora-user-images/image-20230721142408283.png)
+
+AF MSA + DBSCAN cluster MSA可以得到不同的构象比如RfaH和Mad2
+
+
+
+#### why is the signal for two signals
+
+
+
+
+
 ## 文献中的生物实验
 
 - **[Language models generalize beyond natural proteins](file:///Users/sirius/Desktop/2022.12.21.521521v1.full.pdf)**
@@ -3650,3 +3727,14 @@ From fisher divergence to score matching etc.
 
 
 ![image-20221225175751977](/Users/sirius/Library/Application Support/typora-user-images/image-20221225175751977.png)
+
+
+
+## 机器学习原理
+
+### 核密度估计KDE
+
+一种非参数方法对N个样本点的数据分布进行估计，不需要对数据的先验分布进行假设
+
+- n个数据样本，使用n个weighted kernel function进行求和得到估计的kernel density
+- 需要选择的一个超参数是带宽，带宽越小越尖锐，带宽越大越平滑
