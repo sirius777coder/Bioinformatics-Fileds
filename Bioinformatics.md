@@ -605,6 +605,260 @@ for x in loader: # load a minibatch x with N samples
 
 
 
+### GPT1
+
+>  Generative Pre-Training - GPT是后面人给他取的名字
+
+GPT引用度更低是因为 OpenAI选择了更困难，更大的问题 - 强人工智能，需要更大的模型，学术界很难跟进
+
+Transformer, Bert都是想解决更小的问题，想实实在在的提升模型效果
+
+
+
+**Abstract**
+
+1. NLP有大量的未标注的数据，但是缺乏具体问题标注的数据。作者提出可以通过先在大规模没有标号的**语言模型上进行预训练**，**再在下游任务进行判别式的微调**
+2. 考虑到NLP下游任务的多样性，有的时候需要对词性判断，有的时候需要对句子判断，有的时候需要对成对的句子判断，与过去NLP预训练模型相比，**GPT的优势在于构建不同的输入进行微调，而不需要改变网络架构** "make use of task-aware input transformations during fine-tuning to achieve effective transferr while requiring minimal changes to the model architectur"
+   - 过去预训练如 Word2Vec和word embedding 只是在词上面做一个学习，后面的模型还得具体构造
+
+
+
+**Framework**
+
+3.1 **unsupervised pre-training**
+
+假设数据集是$U={u_1,u_2,...,u_n}$，使用标准的语言模型建模$L_1(U)=\sum\limits_i\log P_{\theta}(u_i|u_{i-k},...u_{i-1})$
+
+k表示每个句子的长度，也可翻译为上下文窗口 context window 
+
+
+
+GPT的模型只用了Transformer decoder中的 masked MHA , 没有使用Cross Attention
+
+
+
+3.2 **supervised fine-tuning**  
+
+判别式的微调 , 构造任务specific的输入之后挑选最后一个token的embedding进行MLP子任务的微调
+
+假设模型输入是$x^1,x^2,...,x^m$和标签$y$, 将输入通过$l$层的训练好的GPT之后，提取出最后一层，最后一个token的输出$h_l^m$，通过MLP和softmax进行分类 : $P(y|x^1,x^2,...,x^m)=softmax(W_yh_l^m)$ , 监督微调是$L_2(C)=\sum_\limits{(x,y)}\log P(y|x^1,...,x^m)$等价于最小化交叉熵
+
+整体的目标函数是一个联合目标函数$L_3(C)=L_2(C)+\lambda L_1(C)$, 作者发现在微调时同时保留语言模型的损失函数会更好
+
+
+
+3.3 **Task-specific input transformation** 构造和任务相关的输入
+
+NLP四大常见的任务
+
+- 分类 Classification 
+  - 对句子的性质进行分类
+  - `<Start>,<Text>,<Extract> ` -> Transformer -> Linear  提取最后的extract token进行linear嵌入
+- 蕴含 Entailment 
+  - Premise 是否蕴含了 Hypothesis , 三分类问题
+  - `<Start>,<Premise>,<Delim>,<Hypothesis>,<Extract>` -> Transformer -> Linear
+- 相似性 Similarity 
+  - `<Text1>` 与` <Text2>` 的相似性，考虑到GPT训练时候是有顺序的，相似性的任务是有对称性的，因此网络架构如下
+  - 判断两段文字是否相似：两个文档是否相似来去重，两个问题是否相似
+
+![截屏2023-10-28 13.08.20](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-10-28 13.08.20.png)
+
+
+
+GPT1参数量 : 110 M
+
+- 词典大小 ： 30,000 * 768 = 23 million = 23 * 1e6
+- Transformer Block 大小 ： 12 * 768 ^ 2 * 12  = 85 million = 85 * 1e6
+
+
+
+### GPT2
+
+比Bert更大的模型，选择去做更难的zero-shot
+
+由于zero-shot不能在下游任务训练，因此在预训练的时候模型见到的输入应该和下游任务保持一致
+
+
+
+### GPT3
+
+回归Few-shot learning，只不过现在FW 不需要梯度下降更新参数，完全当成prompt进行输入
+
+或者称为 in-context learning
+
+Q：为什么Few shot例子不能太多
+
+A：模型在推理时通过注意力机制抓取few shot example的信息，如果few shot太长，模型可能无法完全捕获这种信息。这也是为什么GPT3当时的效果没有这chatGPT这么好，因为多轮对话的能力有限，每次开启新的预测时真的都需要进行few shot。
+
+
+
+GPT3-small 对标Ber base和GPT1 的batch size是0.5M, LR是6e-4
+
+GPT-3 175B 3.2M的batch size，LR 是0.6e-4
+
+
+
+GPT的缺陷
+
+- 自回归模型不能双向看，在一些NLP任务上存在天然的局限性
+
+> We focused on exploring in-context learning behavior in autoregressive language models because it is straightforward to both **sample and compute likelihoods** with this model class. As a result our experiments do not include any bidirectional architectures or other training objectives such as denoising. This is a noticeable difference from much of the recent literature, which has documented improved fine-tuning performance when using these approaches over standard language models. Thus our design decision comes at the cost of potentially worse performance on tasks which empirically benefit from bidirectionality. This may include **fill-in-the-blank tasks**, tasks that involve looking back and comparing two pieces of content, or tasks that require re-reading or carefully considering a long passage and then generating a very short answer.
+
+- 均匀的预测每一个token，不能对token的重要性进行评估
+
+
+
+![截屏2023-10-28 14.49.06](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-10-28 14.49.06.png)
+
+### Instruct GPT to chatGPT and Claud
+
+#### InstructGPT
+
+chatGPT来自GPT3.5的微调，GPT3.5来自GPT3加入了github代码的数据（codex）
+
+
+
+标题：Training Language models to follow instructions with human feedback 
+
+
+
+
+
+#### 摘要
+
+> 省流版本：一般做一个大的模型就是大力出奇迹，NLP做解释的任务的话就必须要求自己的数据量足够大，模型见过这些数据。这会有一些问题，1. 有效性，想让模型学习一些任务，但由于训练数据中根本没有这些任务所以模型根本学不会  2.安全性，模型输出一些不应该输出的东西。最简单的办法，**在预训练的语言模型上利用人为标号 (human feedback)的数据进行微调。 再根据人为标注的排序做强化学习。**
+
+从工业部署产品的角度而言，大预言模型可能会产生 **不真实的 untruthful , 有毒的 toxic, 对用户没有帮助的simply not helpful 输出** , 通过OpenAI API收集到的问题和标准答案微调GPT3，并利用专家对GPT3回答的问题进行排序，继续用强化学习训练的 模型叫InstructGPT，这个模型1.3B 只有 GPT3的百分之一（175B），但是输出更加友好，且在NLP任务的benchmark上效果不会下降很多
+
+- helpful and honest: 人为标注主要了增强模型的有效性
+
+- harmless : **强化学习通过对输出排序来减少模型输出有害的信息的概率**
+
+**RLHF (reinforcement learning from human feedback)** ，其中human feedback本质上就是labeld data
+
+##### 模型
+
+**SFT(Supervised fine-tuning)** : 从GPT3训练而来，本质是有监督的微调
+
+- 输入prompt问题，标准答案是由专家写的答案，一共13K的数据和标准答案。训练时16epochs , cosine learning rate decay 
+- 注意第一步SFT模型标注是非常贵的
+- 13K的数据
+
+**Reward modeling (RM)** : 通过一个奖励模型来代替人工实时标注的成本，希望通过排序的loss使得模型输出的值和标注的ranking保持一致
+
+- 从SFT而来，去掉最后一个unmembedding layer `nn.Linear(n_embd, vocab)`，增加一个output dim = 1的线性层`nn.Linear(n_embed, 1)`来输出scalar reward
+- 输入是promt+responese
+- 由于输出是scalar reward，但是人工标注的是不同答案的顺序，所以需要将这些顺序换成一个值，这里使用**pairwise ranking loss**，假设每个样本x，一共输出K=9个回答并人工进行标注顺序，计算loss每次取2$y_w,y_l$个则共有$\tbinom{K}{2}=36$ 个Loss的平均，其中假设$y_w > y_l$，则最小化Loss等价于$r_{\theta}(y_w) - r_{\theta}(y_l)$的值越大，本质是一个logistic regression二分类的问题
+
+$$
+Loss(\theta) = -\frac{1}{\tbinom{K}{2}} E_{x,y_w,y_l\sim D}[\log(\sigma(r_{\theta}(y_w) - r_{\theta}(y_l))]
+$$
+
+> OpenAI之前做的方法是在K=4点样本里选出最大的，这样容易overfitting
+
+**Reinforcement Learning** :
+
+强化学习中的policy - action -environment , 强化学习与监督学习不一样的是数据会随着模型而发生变化
+
+- 采用了openAI开发的PPO梯度---对深度学习而言就是对下面的目标函数做梯度下降，注意需要**最大化 objective**
+  $$
+  objective(\phi)=E_{(x,y)\sim {D_{\pi_{\phi}RL}}} [ r_{\theta(x,y)-\beta \log(\pi_{\phi}^{RL}(y|x)/\pi ^{SFT}(y|x))}] + \gamma E_{x \sim D_{pretrain}}[\log(\pi^{RL}_{\phi}(x))]
+  $$
+
+  - 三个模型：
+
+    - $\pi_{\phi}^{RL}$ 代表最终学习的第三个深度学习策略模型 GPT3，称为RL policy，**$\phi$是需要学习的参数，一开始初始化为SFT**
+
+    > 对强化学习而言，每一个策略pocily看到一个环境environment会输出一些action，导致环境发生变化。强化学习的数据是随着模型的更新而发生变化的！
+
+    - $\pi^{SFT}$ 是第一阶段微调过的语言模型，参数也固定住了
+    - $r_{\theta}$ 是已经微调过的打分模型，$\theta$此时已经固定住了
+
+  - 训练的三项
+
+    - $E_{(x,y)\sim D_{\pi_{\theta}RL}}r_{\theta}(x,y)$表示rewarding model对此时RL模型的打分，希望在训练过程中让RL模型尽可能多的输出打分高的答案
+
+    - $E_{(x,y)\sim D_{\pi_{\phi}RL}} [-\beta \log(\pi_{\phi}^{RL}(y|x)/\pi ^{SFT}(y|x))]$ 表示RL模型的概率分布和微调过后的SFT模型输出不要差距太大。因为$r_{\theta}$ 只见过微调后的模型----- PPO的核心思想，加了一个KL散度
+
+      > 如果只使用前两项，则模型只能对特定的任务有效，缺乏泛化能力
+
+    - $\gamma E_{x \sim D_{pretrain}}[\log(\pi^{RL}_{\phi}(x))]$ ： **语言模型的损失函数**.  使得模型既在新的数据集上（SFT模型的微调数据集）排序比较好，又在GPT3的数据集($D_{pretrain}$)上表现比较好
+
+
+
+
+
+
+
+### Anthropic - Claud
+
+**Training a Helpful and Harmless Assistant with RLHF**
+
+**Abstract**
+
+在线学习，每周更新新的RL policy，使用了alignment training，模型参数比较大时并不会影响模型的其他性能 
+
+**Introduction**
+
+使LLM对齐以下有效性和无害性 (HH)，做了两个数据集
+
+- **helpful** 有效性的一个数据集：使用标注工人问模型做一些纯文本的任务如QA
+
+- honest
+
+- **harmless** 无害性任务的数据集：使用标注人员引诱模型去讲一些不好的事情
+
+每个标注工人会看到模型生成的两个答案，并在里面选择更helpful 或者 更harmful的回答   
+
+注意到有效性和无害性其实是冲突的，比如无论什么回答模型都说不知道就无害+无用
+
+**综上，强化学习 加入 有效性 + 有害性的奖励函数**
+
+  
+
+1. 小模型具有对齐税  "**alignment taxes**"
+2. HH训练有一定的  
+3. 使用OOD检测问题是否在训练集的分布里面
+
+
+
+
+
+**数据收集**
+
+
+
+**Preference Modeling for Helpfulness and Harmlessness**
+
+Pretrained LM -> PMP (二分类) -> fintuning on human feedback (二分类)
+
+注意PMP和human feedback finetuning都说要进行A比B好的二分类，因此在每一个sample的后面加入一个`end-of-context` token，将该token的输入通过logistic regression 输出分数
+
+- 通过PM做为指导强化学习，使得训练的policy 更符合PM高打分的倾向，同时由于通过PPO进行训练，不能使得训练的policy和原来的policy偏离太多
+
+
+
+**RLHF**
+
+整体的奖励函数$r_{total}=r_{PM}-\lambda_{KL}D_{KL}($policy||policy$_0)$
+
+$r_{PM}$表示 A回答比B回答好的可能性
+
+### GPU加速的口袋对接DSDP - 公开课
+
+- 分子对接
+  - 位点预测 site
+    - 有PDB 和 小分子的共晶结构
+    - AF预测的新蛋白，但不知道靶点 (盲对接)
+      - 如何找靶点
+        - 几何的方法，通过probe 小球在蛋白表面和空腔滚动
+        - 基于模版的方法
+  - 构象采用 pose
+  - Affinity 
+    - ![image-20231022185415564](/Users/sirius/Library/Application Support/typora-user-images/image-20231022185415564.png)
+
+
+
 
 
 ## Ai4S
@@ -1632,7 +1886,7 @@ Hydrogen bond is a primarily electrostatic force of attraction between a hydroge
 - 能量一般可以分为
   - $E_{total}=E_{bonded}+{E_{non-bonded}}$
     - $E_{bonded} = U_{bond} + U_{angle} + U_{dihedral} + U_{improper}$
-      - 非正常二面角应该专指$\omega$ 角
+      - 非正常二面角应该专指$\Omega$ 角, 主要在+- 180度附近，因此是一个二次项的能量项
     - $E_{non-bonded}=U_{VDW}+U_{elec}$
   - 总能量(porential energy + kinetics energy) 保持不变
 - 流程如下
@@ -2295,7 +2549,7 @@ AlphaFold评估其预测结果的置信度
 
 - pLDDT : 每个residue 预测出的lDDT,范围在0,100---- 用来评价每个位置的置信度，不需要label能直接得出，且AF中对应有confidence的自监督loss函数
 
-- PAE (Predicted Aligned Error)  : 每个residue的误差，需要根据label来得出,$e_{(i,j)} = ||T_j^{-1} x_i  - (T_j^{True})^{-1}x_i^{True}|| $ 
+- PAE (Predicted Aligned Error)  : 每个residue的误差，需要根据label来得出,理论上的label$e_{(i,j)} = ||T_j^{-1} x_i  - (T_j^{True})^{-1}x_i^{True}|| $ 
   - for (x,y) aligned on y,  error in x
 
 <img src="/Users/sirius/Library/Application Support/typora-user-images/image-20220420132749499.png" alt="image-20220420132749499" style="zoom:33%;" />
@@ -2371,11 +2625,12 @@ AlphaFold hallucination的问题在于：生成的序列往往是adversarial seq
   - Superposition-free method ---内部之间的距离,手性分子之间是没有差别的！
   
     - dRMSD ： 得到两个结构各自的distance map，再算两个distance map之间的距离 
-    - lDDT
+    - lDDT --- distogram之差与cut-off的比较
       - 规定不同residue的两个原子间距离小于15Å则称这两个原子有相互作用
       - AF中利用的是lDDT-$C_{\alpha}$，计算局部的一个相似性
         - 对每个residue，根据目标结构(reference)找到与其相互作用的$C_{\alpha}$原子
         - 计算**预测结构**中相互作用的$C_{\alpha}$原子距离和真实结构中距离的差值小于cut off 0.5Å,1Å,2Å,4Å的比例，取平均值得到该residue的平均lDDT
+      - ![78751692157149_.pic](/Users/sirius/Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat/2.0b4.0.9/41beb930eeea5ba5f654424eeca84187/Message/MessageTemp/5d43ff8cf5f3cb39294166bc53e2e658/Image/78751692157149_.pic.jpg)
   
 - DeepMind设计的方法 -----FAPE 
 
@@ -2945,7 +3200,7 @@ SPINE2 对$\psi$和$\phi$同时建模，希望能够提高精确度![截屏2022-
 
   - MPNN本身倾向于给surface带负电的glutamate和带正电的lysine；MPNN并不喜欢生成polar aa 
 
-  > ProteinMPNN generates more charged amino acids in expense of the polar ones at low temperatures which likely leads to highly thermo-stable proteins.
+  > **ProteinMPNN generates more charged amino acids in expense of the polar ones at low temperatures which likely leads to highly thermo-stable proteins.**
   >
   > - Rosetta本身同样也会有bias : Core区域的Alanine过多，表面Tryptophans过多
 
@@ -3692,6 +3947,200 @@ AF MSA + DBSCAN cluster MSA可以得到不同的构象比如RfaH和Mad2
 
 
 #### why is the signal for two signals
+
+
+
+### DiG- 郑书新
+
+从结构预测到分布预测 : 统计力学
+
+![image-20230812200852659](/Users/sirius/Library/Application Support/typora-user-images/image-20230812200852659.png)
+
+![image-20230812201131105](/Users/sirius/Library/Application Support/typora-user-images/image-20230812201131105.png)
+
+![image-20230812201626033](/Users/sirius/Library/Application Support/typora-user-images/image-20230812201626033.png)
+
+Q：模拟和蒙特卡洛采样点区别？
+
+Q：想用AI来加速采样，是否是一个好的方法？比如用AI模拟单帧的DFT，这样是否解决了本质的问题？
+
+1. **之前的方法都是统计不独立的，都是基于上一个点进行采样，很容易在一个坑中困住，因此很难在短时间内找到一条可行的路径发现rare events，因此需要大量的重复**
+2. 我们希望有统计独立的方法不需要额外的重复 (假设我们知道了数据pdf)
+3. 为什么大家要选择statistically-dependent的分布---玻尔兹曼分布无法求配分函数
+
+A：AI进行加速并不解决力学的本质。也需要跑几百万步跑甚至更大的数量级，所以需要一个统计独立 iid的方法，不再关心势垒  "ont-shot"
+
+![截屏2023-08-12 20.24.09](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-08-12 20.24.09.png)
+
+AI generative model对统计分布进行建模，之后进行统计同分布的采样
+
+
+
+![截屏2023-08-12 20.29.33](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-08-12 20.29.33.png)
+
+diffusion 或 大部分生成模型，建模了统计分布之后，虽然不知道概率，但是可以按照统计独立的方式进行采样
+
+**T越大，玻尔兹曼分布变成均匀分布**
+
+![截屏2023-08-12 20.32.19](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-08-12 20.32.19.png)
+
+当我们把模型训练好之后，能做哪些事情
+
+- 结构采样
+- 密度估计，一般有两种方法
+  - 定义采样器sampler，拿着大量采样好的样本，返回生成的密度。比如MD和GAN，VAE（虽然图片生成不care这个分布）
+  - diffusion可以直接告诉你每一个样本的density是多少
+- 基于条件概率的生成
+  - 问题：数据不多，属性非常多
+  - diffusion的特点：只需要训练好unconditional的生成，就可以做条件生成
+
+![截屏2023-08-12 20.40.46](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-08-12 20.40.46.png)
+
+
+
+使用特定的Loss，使得收集的数据不需要是稳态分布的介绍，解决了充分模拟的数据本身costly的问题
+
+
+
+![image-20230812213502225](/Users/sirius/Library/Application Support/typora-user-images/image-20230812213502225.png)
+
+
+
+- 
+
+![截屏2023-08-12 21.06.45](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-08-12 21.06.45.png)
+
+![image-20230812211002598](/Users/sirius/Library/Application Support/typora-user-images/image-20230812211002598.png)
+
+
+
+转移路径 <-> diffusion model中latent space中的插值 -------------- 最好用SDE表示的DDIM 因为DDPM是没有一个很好的latenet space
+
+
+
+AF2的蛋白最好做一下优化再去做对接----薛定谔选的benchmark
+
+
+
+AI生成的多构象如何证明？怎么去证明生化机理中真的有这样的多构象
+
+
+
+> 您好，想问几个与DiG相关的问题：
+> 1. DiG中的Loss与Boltzmann generator 的loss有什么异同
+>
+> - Botlzman generator 是19年的主刊paper，现在也去微软了，也是DiG的作者
+> - Botlzman generator 是对特定的蛋白的分布进行近似，DiG是对所有的稳态分布进行建模
+> - Diffusion不仅有整体的energy，还需要一个整体的energy,DiG有了PIPG的loss训练
+>
+> 2. DiG的training schedule总是需要知道energy的能量
+>
+> 3. DiG对于ood的问题是怎么处理的，MD希望能够采样到与初始构象差异大的构象，而且是越大越难。DiG是不是也面临着同样的问题呢 
+
+
+
+### Cyclic peptide structure prediction and design using AlphaFold
+
+### 
+
+### OpenAI- chat GPT
+
+1. Training GPT4 - **base loads are not assitant , they just want to complete documents**
+
+   - Ptretraining (99%)
+     - Data collection
+
+   - Supervised Finetuning - SFT model 换了一个更高质量的模型
+
+
+
+2. 
+
+
+
+### AIR 2023 10.14
+
+28家AI公司，临床前42，I期13，2期11，III期1个
+
+肿瘤45%，罕见病13%
+
+AIDD中：AI方法与应用脱节，算法的人才假象出一些科学问题；而做药物的人只是拿AI做锦上添花的事情
+
+**药物靶标是原创新药发现的源泉，靶点对于药物设计是最重要和最缺乏的事情**
+
+
+
+预训练 word2vec - 蛋白质相分离预测 + PPI预测
+
+
+
+靶点评估 
+
+
+
+小分子进行预训练：编码成二维的图，对比学习进行预测小分子进行预训练
+
+小分子进行预训练生成
+
+>  英夕智能，世界上首个利用AI找到药物靶点的公司
+
+
+
+AI4science , 生成的模型存在大概率不是合理的，但是天然的序列或者小分子存在都是合理的
+
+
+
+由于蛋白质靶标耗尽，现在寻找到一些RNA靶标和RNA的疗法，寻找是否能够对RNA进行调控
+
+- RNA结构不稳定，柔性大，不太能像蛋白靶标一样稳定和特异性
+- 可以找一些RNA结构ensemble ，靶标这些RNA ensemble ，proposed RNA可以做为新的靶标
+- 1 碱基 $\approx$ 3 氨基酸 大小，小核算仍然是大分子
+
+
+
+市场上唯一一个FDA批准的靶向RNA药物：risdiplam , 
+
+**两个问题：1. 找到合适的RNA靶标  2. 找到合适的小分子结合RNA靶标**
+
+
+
+Q: 如何把蛋白/RNA 与小分子结合训练？ 
+
+A: SmrtNet : 输入是RNA + 小分子，小分子通过一个已经established chemical language model，RNA通过自己的model，特征进行fusion(比如concatenation) 
+
+
+
+RNA的结构太动态了，用二级结构描述狠详细
+
+
+
+PDB 20W个结构 大致只有1383 个RNA结构
+
+RNA二级结构的种类：
+
+
+
+### MD在酶改造中的应用
+
+- 蛋白质动力学
+  - 定向进化提升10000倍，同时进化出更强的动态相关网络
+
+- 酶稳定性改造
+  - 刚化柔性位点，因为柔性位点高温下最先解折叠，带动其他部位折叠
+  - 预测柔性区域
+    - RMSF - grimaces , NPT 10 ns
+    - B-factor
+  - 柔性区域确定, 使用了统计学结果 beta-turn确定点突变；也可利用rosetta $\Delta \Delta G$ 的ranking来计算, Rosetta ddg monomer 假阳性太多
+
+![截屏2023-10-22 20.41.48](/Users/sirius/Library/Application Support/typora-user-images/截屏2023-10-22 20.41.48.png)
+
+![image-20231022204338615](/Users/sirius/Library/Application Support/typora-user-images/image-20231022204338615.png)
+
+
+
+- 点突变之间的非加和性
+  - 点突变会引起局部区域或者较远区域的柔性变化，**注意远距离的动力学相关性是存在且比较重要的 (正相关或者负相关)**
+  - 假设：分子动力学的互相关性介导点长距离突变的相互作用
 
 
 
