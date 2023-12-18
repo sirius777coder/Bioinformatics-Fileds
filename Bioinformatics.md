@@ -14,7 +14,7 @@
 
 All, reduce , gather
 
-- AllReduce
+- AllReduce -- **交换N个进程的数据并进行规约(求和，最大值)操作, 输出到所有进程**
 
 The AllReduce operation is performing reductions on data (for example, sum, max) across devices and writing the result in the receive buffers of every rank.
 
@@ -28,7 +28,7 @@ Important note: The root argument is one of the ranks, not a device number, and 
 
 
 
-- Reduce
+- Reduce 
 
 The Reduce operation is **performing the same operation as AllReduce, but writes the result only in the receive buffers of a specified root rank.**
 
@@ -40,7 +40,7 @@ PS : Reduce + Brodcast = AllReduce
 
 
 
-- AllGather
+- AllGather - **收集每个进程完整的数据集**，通讯代价比较大
 
 In the AllGather operation, each of the K processors aggregates N values from every processor into an output of dimension K*N. The output is ordered by rank index.
 
@@ -4141,6 +4141,18 @@ RNA二级结构的种类：
 - 点突变之间的非加和性
   - 点突变会引起局部区域或者较远区域的柔性变化，**注意远距离的动力学相关性是存在且比较重要的 (正相关或者负相关)**
   - 假设：分子动力学的互相关性介导点长距离突变的相互作用
+
+
+
+### Structure analysis in the era of next-generation structure prediction - MatrixStinger
+
+
+
+
+
+Foldseek 首先要开发一个使用neighbor 信息的alphabet
+
+
 
 
 
