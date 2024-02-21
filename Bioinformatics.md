@@ -2342,7 +2342,7 @@ GCPR 膜蛋白
 - TM-score对**蛋白质序列的长度无关**，如果长度一样则直接进行从N端到C端的每个原子的计算，长度不一样需要先利用结构比对，找到commom residue进行计算
 
 $$
-TM-score = \max_i[\frac{1}{L_{largest}}\sum_i^{common}\frac{1}{1+(\frac{d_i}{d_0(largest)})}]
+TM-score = [\frac{1}{L_{target}}\sum_i^{common}\frac{1}{1+(\frac{d_i}{d_0(largest)})} ]\in(0,1]
 $$
 
 **TMalign** : 一种基于蛋白质结构进行比对的方法，能够基于结构生成残基到残集的比对，与蛋白质序列是无关的，只和backbone有关，因此AF Design即可以用TM score进行固定主链的蛋白质设计！
@@ -3377,7 +3377,7 @@ Anfisen的原则到底是不是普适的规则？
 
      - TMalign就是这种不给定prior equivalency，通过三种初始化方法（二级结构DP，threading 初始化等）利用TM-score进行启发式迭代
 
-       
+     
 
 ### John Jumper   Kendrew Lecture 2021
 
@@ -4188,6 +4188,30 @@ Foldseek 首先要开发一个使用neighbor 信息的alphabet
 
 
 ![image-20221225175751977](/Users/sirius/Library/Application Support/typora-user-images/image-20221225175751977.png)
+
+
+
+- 高通量检测PPI的方法 --- 检测两个蛋白之间是否有物理相互作用
+
+  - AP-MS 亲和纯化质谱 : 也是一种bait-prey 的方法
+
+  - 酵母双杂 Y2H, Y2H screen, Y2H system
+
+    - **需要一个 downstream reporter gene，在这个基因前需要一个promoter sequence**来结合 transcription factor，这个factor再招募RNA polymerase合成RNA。注意这个基因表达不表达很容易被高通量的检测，比如HIS3 gene，该基因表达的产物对于Histidine biosynthesis非常重要，没有这个基因，细胞就不会在histidine depleted media中生长；或者 Reporter gene为LacZ基因，上游Up Activation Sequence (UAS)![Two_hybrid_assay](/Users/sirius/Downloads/Two_hybrid_assay.svg)
+
+    - 原理：将transcroption factor分为两个segment，一个是DNA binding domain（BD），被fused到X蛋白，称为Bait，负责结合DNA；另一个segment 是activation domain （AD）被fused到Y蛋白上，称为Prey，负责激活转录
+
+      - 当两个蛋白相互作用，reporter gene就会被检测出表达
+
+      - 两个蛋白不发生相互作用，reporter gene不会表达
+
+>  High-throughput experimental methods such as yeast two-hybrid and affinity purification mass spectrometry have been used to identify interactions in multiple organisms, but there are inconsistencies between different datasets, and the methods do not provide high-resolution structural information
+
+最早是split Saccharomyces cerevisiae的Gal4 转录因子，负责激活下游的基因产生乳糖 (lactose)，进而进行高通量的蛋白筛选
+
+
+
+
 
 
 
