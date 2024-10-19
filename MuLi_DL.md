@@ -101,6 +101,18 @@ GQA, mask self-attention, scaling laws
       1. 背景：在模型推理时，为了推理速度，现在大模型都使用了kv-cache保存之前token的Key和Value，但是key-value内存占用太大了，一个token经常就是1-2M，1000个token就有1-2个G，因此KV-cache很占用内存
       2. 目的：在保证推理速度的前提下（保留kv-cache），使用GQA节省内存，特别是对70B以上的模型，在训练时给query一个head数目，给key/value一个head数目，使用shared weights的思想，类似input和output embedding使用一个embedding matrix
       3. 方法：多头注意力机制中，N个头本来会诞生N组Q，K，V；现在依然是N组Q，但是K和V不同的头group一下，比如两两K和V，共用一组投影矩阵，这样在推理的时候一来不需要全部的K, V weight matrix，二来不需要为每一个头保留K和V，只需要每一个group保留K和V即可。Lamma3用了8 key-value heads表示8个key-value共享一个投影矩阵，而Llamma3 70B模型默认是64个头，将KVcache的缓存压力降低了八倍。**注意：GQA是在降低每一个token内部多个head的KVcache，不涉及token之间的情况，也不会降低query的head。现在有Attention Heads与，Key/Value Heads两个头的大小，Group大小=Attention_heads / KeyValue_heads**
+      ```
+      def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+         """torch.repeat_interleave(x, dim=2, repeats=n_rep) from Llamma3"""
+         bs, slen, n_kv_heads, head_dim = x.shape
+         if n_rep == 1:
+            return x
+         return (
+            x[:, :, :, None, :]
+            .expand(bs, slen, n_kv_heads, n_rep, head_dim)
+            .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+         )
+      ```
    3. 与之前工作的一些区别：如果进入模型序列中有多个文档的样本，做self-attention时会进行mask。模型训练时一个序列token 12K, 8K等等有可能来自多个文档的拼接，每个token应该只算自身文档内部的attention score，其他位置的score应该设置为0。这对特别长的token有用
    4. 与之前工作的一些区别：Llamma3有128K tokens，在GPT4 10k tokens前提上增加了多语言的tokens
    5. 与之前工作的一些区别：使用了更大超参数的RoPE

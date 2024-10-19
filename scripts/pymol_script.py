@@ -5,6 +5,8 @@ import json
 import numpy as np
 
 
+# [mmalign(i,'TMP_029') for i in cmd.get_names("objects")]
+
 def tmalign_folder_pdb(folder,save_path="./output.pse",methods="mmalign",align_pdb=None):
     cmd.reinitialize()
     cmd.do("run /home/sirius/Desktop/tmalign.py")
