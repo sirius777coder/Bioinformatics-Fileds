@@ -25,6 +25,7 @@ def tmalign_folder_pdb(folder,save_path="./output.pse",methods="mmalign",align_p
         align_object = os.listdir(folder)[0]
         align_object = align_object.split(".")[:-1]
         align_object = ".".join(align_object)
+    # mmalign
     for obj in cmd.get_object_list():
         cmd.do(f"{methods} {obj}, {align_object}")
     cmd.set('grid_mode', 1)
