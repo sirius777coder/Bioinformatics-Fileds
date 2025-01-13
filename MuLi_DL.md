@@ -8,11 +8,11 @@
 2. 与之前工作比较
    1. 与RNN相比，计算效率更高，且每一次计算可以得到全部的序列信息，RNN需要N次，且RNN无法并行
    2. 与CNN相比，计算效率也高，CNN虽然可以并行，但是1d CNN一次只能看窗口大小为k的序列，如果想要全局视野必须要放很多卷积层才可以
-3. other 
+3. other
    1. why scaled dot product : $score_{ij}=\bold{q}\bold{k}^T=\sum\limits_{i=1}^{d_k}q_ik_i$ mean is 0 and variance is $d_k$, so $\frac{score_{ij}}{\sqrt{d_k}}$ has mean zero and variance 1. The same reason with Kaming initialization
    2. label smoothing is different with maxium likelihood, cross entropy with label smoothing
-    $loss=-\sum\limits_{i=1}^N\sum\limits_{c=1}^{k}\hat{y}_{i,c}\log P(y_i=y_c)$, $NLLLoss=-\sum\limits_{i=1}^N\log P(y_i=\hat{y_i})$
-标准点积注意力机制，将原来的x复制三次得到qkv，没有可学习参数
+      $loss=-\sum\limits_{i=1}^N\sum\limits_{c=1}^{k}\hat{y}_{i,c}\log P(y_i=y_c)$, $NLLLoss=-\sum\limits_{i=1}^N\log P(y_i=\hat{y_i})$
+      标准点积注意力机制，将原来的x复制三次得到qkv，没有可学习参数
 
 ```
 # original scaled-dot product self-attention 
@@ -79,9 +79,6 @@ output = torch.einsum("bqkh,bkhc->bqhc",score,v).reshape(batchsize, seqlen,-1)
 output = Wo(output)
 ```
 
-
-
-
 ### GPT1/2/3  - 23
 
 1. GPT1微调用最后一个token的embedding，进行信息抽取；GPT23和1的区别，不用微调下游任务，把下游任务的输入输出构造成和微调一样的形式 ; GPT2和1的区别：提前normalization,初始化方式不同
@@ -98,9 +95,11 @@ GQA, mask self-attention, scaling laws
 2. Llamma3模型架构
    1. 标准的稠密Transformer架构 -- dense Transformer architecture，与Llamma, Llamma2区别不大
    2. 与之前工作的一些区别：GQA，grouped-query attention
+
       1. 背景：在模型推理时，为了推理速度，现在大模型都使用了kv-cache保存之前token的Key和Value，但是key-value内存占用太大了，一个token经常就是1-2M，1000个token就有1-2个G，因此KV-cache很占用内存
       2. 目的：在保证推理速度的前提下（保留kv-cache），使用GQA节省内存，特别是对70B以上的模型，在训练时给query一个head数目，给key/value一个head数目，使用shared weights的思想，类似input和output embedding使用一个embedding matrix
       3. 方法：多头注意力机制中，N个头本来会诞生N组Q，K，V；现在依然是N组Q，但是K和V不同的头group一下，比如两两K和V，共用一组投影矩阵，这样在推理的时候一来不需要全部的K, V weight matrix，二来不需要为每一个头保留K和V，只需要每一个group保留K和V即可。Lamma3用了8 key-value heads表示8个key-value共享一个投影矩阵，而Llamma3 70B模型默认是64个头，将KVcache的缓存压力降低了八倍。**注意：GQA是在降低每一个token内部多个head的KVcache，不涉及token之间的情况，也不会降低query的head。现在有Attention Heads与，Key/Value Heads两个头的大小，Group大小=Attention_heads / KeyValue_heads**
+
       ```
       def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
          """torch.repeat_interleave(x, dim=2, repeats=n_rep) from Llamma3"""
@@ -125,3 +124,28 @@ GQA, mask self-attention, scaling laws
          > 任务1 scaling laws更适合预测NLLLoss，而且和模型架构数据强相关，不同的模型和数据都需要算一个新的scaling laws；而任务2NLLLoss与精度则和模型架构没什么关系。这样可以同时预测scaling laws和下游任务的性能与NLLLoss
          >
       3. 文章figure2画图表示不同的计算资源前提下，用多大的训练样本，可以实现最好的性能
+
+### Sora- 55
+
+一些相关工作：快手可灵、Meta Movien Gen、腾讯混元Video  、Google DeepMind Veo 2
+
+#### Movie Gen : A cast of Median Foundation Models
+
+数据分布+embedding cluster均匀采样
+
+3.2 数据清洗
+
+1. 从4s -> 2mins的数据清洗为**4s-16s**的clip-prompt pair，尽量使得预训练的时候见到一些single-shot camera和non-trival motion。所以一般模型最好输出就是在10s左右。模型预训练的时候最好不要见特别复杂的样本，即使要放在训练里也是放在后面的阶段训练
+   > clip表示短的视频片段，通过别的模型来将视屏切割成很多小的模型
+   >
+2. 视屏如何去重？
+   1. 对视屏做embedding做cluster，**从每一个cluster中比较均匀的抽取样本，一般根据inverse suqare root of the cluster size来抽取**。做这一个工作的前提是，Meta自身已经有了一个非常好的video-text joint embedding
+3. 根据视屏重新生成caption，因为网上爬去的caption很大概率是一些比较短的，无法完全体现视屏内容的caption。因此根据之前filtering的视频重新用LLaMa3-Video生成了caption
+
+**最后清洗数据只剩下百分之一的数据**
+
+3.2.2 多阶段预训练
+
+1. Text-to-image Task , joint training (Text-to-image + Text-to-video)
+2. Resolution scaling
+3. Fine-tuning一定是高质量的，人为选择的，不能全是human curated dataset来找的
