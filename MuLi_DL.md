@@ -87,6 +87,58 @@ output = Wo(output)
 4. 为什么需要多头注意力机制：GP T参数dmodel 增加1000倍，但每一个头的维度dread 大小不到2倍(如64->128)，只是会把头的个数nheads增加100倍(12->96)
 5. 从模型效果来看，小模型适合小的批量，这样主动带来一些噪音防止过拟合；而大模型则更适合大批量大小，研究发现大模型即使一个批量里没有什么噪音，好像也不容易过拟合
 
+
+
+
+### Neural Corpus Indexer - 47
+使用transformer记住你的文档，做检索时不需要看doc内容直接根据query来生成docid
+> 机器学习里面好的结果，百分之九十是由bug造成的，比如信息泄露等等，看到好的结果一定要反复确认和验证
+
+导言:
+1. 文档检索和排序是标准网页搜索最重要的两个方面，检索的召回率是比较重要的，需要在检索的时候尽可能多的找到相关文档，不然排序是没有意义的
+
+2. 检索可以分为两类
+- term-based：基于词的
+构建一个inverted index系统，是一个巨大的字典json，存储了所有的词、以及出现的文档位置,一般通过java script实现,也是主流的网页搜索实现的方法,问题是无法实现基于语义的查询,搜索transformer无法返回bert
+- semantic-based: 基于语义的
+Two towerd 深度学习方法，根据query的latent embedding去找高相似性的document embedding,问题是用一个single embedding vector来表示一个语义特征很有可能是不够的;在需要exact match的情况下甚至会比term-based方法还糟糕;还有一个问题是相似的方法都是欧几里得空间的cosine similarity,如果query和document关系比较复杂,可能这样的similarity是不够的
+
+模型
+- 输入query序列,输出docid(interger),  sequence-to-sequence
+- 模型在训练的时候将文档放到参数里面
+   - 数据1：labled data <query,docid>
+   - 数据2：docs <doc, docid>
+      - 由于doc一般比query长，可以将doc切分为不同的query
+-  模型训练有两个目标
+   - 将文档内容压缩到参数里
+   - 学习query到docid的映射
+
+Q1 : 设计docid使得id不仅仅是随机数据，而是带有语义的信息
+Representing document with semantic identifiers
+- hierarchical k-means docid (如果某个类的个数多于cutoff,则继续进行K-means)
+
+- 对某个物体进行十万类/百分类的分类，通常不会进行一个超大的softmax,而是先做大类的分类，在大类里面做小类分类
+
+Q2 : 如何拆分<doc, docid>数据
+Query generation使用两种方法
+
+- 用大语言模型来编码：使用DockT5Query, 编码器的输入是document,解码器是query,使用random sampling来保证query的多样性
+
+- 直接利用doc内容作为query:将最开始的64个term作为query, 并随机取10组64个连续的term作为query
+
+
+Q3 : seq2seq模型
+
+
+模型存在的问题
+- efficiency比较差
+   - Latency 大概110ms左右
+   - Throughpt 为58query每秒，远远小于实际搜索引擎的query数目
+- 当有了新的文档之后，无法有效的更新doc-id
+- 模型计算相比传统的term-based inverted index仍然比较贵
+
+
+
 ### Llamma 3.1  - 54
 
 GQA, mask self-attention, scaling laws
